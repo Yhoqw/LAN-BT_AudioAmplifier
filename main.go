@@ -1,13 +1,25 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
+	"net/url"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/grandcat/zeroconf"
+	"github.com/faiface/beep"
+	"github.com/faiface/beep/effects"
+	"github.com/faiface/beep/mp3"
+	"github.com/faiface/beep/speaker"
+	"github.com/faiface/beep/wav"
 )
 
 // Simple state
@@ -15,6 +27,16 @@ var (
 	isHost           = false
 	connectedClients = make(map[string]*websocket.Conn)
 	discoveredHosts  = make(map[string]string)
+	mdnsServer       *zeroconf.Server
+	// Audio state
+	audioBuf         *beep.Buffer
+	audioFormat      beep.Format
+	audioCtrl        *beep.Ctrl
+	audioVol         *effects.Volume
+	audioSampleRate  beep.SampleRate
+	audioProgress    *progressStreamer
+	audioTickerStop  chan struct{}
+	audioMu          sync.Mutex
 )
 
 // Websocket upgrader
@@ -37,7 +59,6 @@ func main() {
 	// Start Websocket server
 	http.HandleFunc("/ws", handleUIWebSocket)
 
-	// Start mDNS advertisement/discovery in background
 	go startDiscovery()
 
 	port := "9090"
@@ -92,13 +113,13 @@ func handleUIMessage(conn *websocket.Conn, msg UIMessage) {
 		}
 
 	case "play":
-		startPlayback(conn) // Fixed: was StartStreaming
+		startPlayback(conn)
 
 	case "pause":
-		pausePlayback(conn) // Fixed: was pauseStreaming
+		pausePlayback(conn)
 
 	case "stop":
-		stopPlayback(conn) // Fixed: was stopStreaming
+		stopPlayback(conn)
 
 	case "volume":
 		if vol, ok := msg.Data["level"].(float64); ok {
@@ -128,11 +149,9 @@ func become_host(conn *websocket.Conn) {
 
 func scan_devices(conn *websocket.Conn) {
 	fmt.Println("Scanning for devices...")
-
-	// Mock discovery
+	mdnsBrowseOnce(conn)
 	discoveredHosts["John's Laptop"] = "192.168.1.100:9090"
 	discoveredHosts["Living Room PC"] = "192.168.1.101:9090"
-
 	for name, address := range discoveredHosts {
 		sendToUI(conn, "device_found", map[string]interface{}{
 			"name":    name,
@@ -140,12 +159,17 @@ func scan_devices(conn *websocket.Conn) {
 			"type":    "host",
 		})
 	}
-
-	logMsg(conn, fmt.Sprintf("Discovered %d devices", len(discoveredHosts)))
 }
 
 func connectToHost(conn *websocket.Conn, address string) {
 	isHost = false
+	u := url.URL{Scheme: "ws", Host: address, Path: "/ws"}
+	c, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
+	if err != nil {
+		logMsg(conn, "Remote connect failed: "+err.Error())
+		return
+	}
+	connectedClients[address] = c
 	sendToUI(conn, "connected", map[string]interface{}{
 		"address": address,
 		"name":    "Remote Host",
@@ -154,34 +178,127 @@ func connectToHost(conn *websocket.Conn, address string) {
 }
 
 func startPlayback(conn *websocket.Conn) {
+	audioMu.Lock()
+	defer audioMu.Unlock()
+	if audioBuf == nil {
+		logMsg(conn, "No audio file loaded")
+		return
+	}
+	if audioTickerStop != nil {
+		close(audioTickerStop)
+		audioTickerStop = nil
+	}
+	stream := audioBuf.Streamer(0, audioBuf.Len())
+	audioProgress = &progressStreamer{s: stream, total: audioBuf.Len()}
+	audioCtrl = &beep.Ctrl{Streamer: audioProgress, Paused: false}
+	if audioVol == nil {
+		audioVol = &effects.Volume{Streamer: audioCtrl, Base: 2, Volume: 0, Silent: false}
+	} else {
+		audioVol.Streamer = audioCtrl
+	}
+	if audioSampleRate == 0 {
+		audioSampleRate = audioFormat.SampleRate
+	}
+	if err := initSpeakerOnce(audioSampleRate); err != nil {
+		logMsg(conn, "Audio init failed: "+err.Error())
+		return
+	}
+	done := make(chan bool, 1)
+	speaker.Play(beep.Seq(audioVol, beep.Callback(func() {
+		done <- true
+	})))
 	sendToUI(conn, "playback_started", map[string]interface{}{"position": 0.0})
-	go func() {
-		for i := 0; i <= 100; i++ {
-			time.Sleep(500 * time.Millisecond)
-			sendToUI(conn, "progress_update", map[string]interface{}{
-				"position": float64(i),
-				"total":    100.0,
-			})
+	audioTickerStop = make(chan struct{})
+	go func(stop <-chan struct{}) {
+		t := time.NewTicker(500 * time.Millisecond)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				pos := float64(audioProgress.samplesPlayed)
+				total := float64(audioProgress.total)
+				sendToUI(conn, "progress_update", map[string]interface{}{
+					"position": pos,
+					"total":    total,
+				})
+			case <-done:
+				sendToUI(conn, "playback_stopped", map[string]interface{}{})
+				return
+			}
 		}
-	}()
+	}(audioTickerStop)
 }
 
 func pausePlayback(conn *websocket.Conn) {
+	audioMu.Lock()
+	defer audioMu.Unlock()
+	if audioCtrl != nil {
+		audioCtrl.Paused = true
+	}
 	sendToUI(conn, "playback_paused", map[string]interface{}{})
 }
 
 func stopPlayback(conn *websocket.Conn) {
+	audioMu.Lock()
+	defer audioMu.Unlock()
+	if audioCtrl != nil {
+		audioCtrl.Paused = true
+	}
+	if audioTickerStop != nil {
+		close(audioTickerStop)
+		audioTickerStop = nil
+	}
 	sendToUI(conn, "playback_stopped", map[string]interface{}{})
 }
 
 func setVolume(conn *websocket.Conn, level float64) {
+	audioMu.Lock()
+	defer audioMu.Unlock()
+	if audioVol != nil {
+		// Map 0..100 to -5..0 (approx 1/32 to full volume)
+		gain := (level - 100.0) / 20.0
+		audioVol.Volume = gain
+	}
 	sendToUI(conn, "volume_changed", map[string]interface{}{"level": level})
 }
 
 func loadAudioFile(conn *websocket.Conn, filepath string) {
+	audioMu.Lock()
+	defer audioMu.Unlock()
+	f, err := os.Open(filepath)
+	if err != nil {
+		logMsg(conn, "Open failed: "+err.Error())
+		return
+	}
+	defer f.Close()
+	ext := strings.ToLower(filepathExt(filepath))
+	var (
+		stream beep.StreamSeekCloser
+		format beep.Format
+	)
+	switch ext {
+	case ".wav":
+		stream, format, err = wav.Decode(f)
+	case ".mp3":
+		stream, format, err = mp3.Decode(f)
+	default:
+		logMsg(conn, "Unsupported format: "+ext)
+		return
+	}
+	if err != nil {
+		logMsg(conn, "Decode failed: "+err.Error())
+		return
+	}
+	defer stream.Close()
+	audioFormat = format
+	audioBuf = beep.NewBuffer(format)
+	audioBuf.Append(stream)
+	durationSec := float64(audioBuf.Len()) / float64(format.SampleRate)
 	sendToUI(conn, "file_loaded", map[string]interface{}{
 		"filename": filepath,
-		"duration": 180.0,
+		"duration": durationSec,
 	})
 }
 
@@ -209,5 +326,85 @@ func logMsg(conn *websocket.Conn, message string) {
 }
 
 func startDiscovery() {
-	fmt.Println("Discovery service started (mock mode)")
+	name, _ := os.Hostname()
+	ip := getLocalIP()
+	instance := fmt.Sprintf("%s-%s", name, ip)
+	server, err := zeroconf.Register(
+		instance,
+		"_lan-bt-audio._tcp",
+		"local.",
+		9090,
+		[]string{"path=/ws"},
+		nil,
+	)
+	if err != nil {
+		fmt.Println("mDNS register failed:", err)
+		return
+	}
+	mdnsServer = server
+	fmt.Println("mDNS service advertised")
+}
+
+func mdnsBrowseOnce(conn *websocket.Conn) {
+	resolver, err := zeroconf.NewResolver(nil)
+	if err != nil {
+		fmt.Println("mDNS resolver create failed:", err)
+		return
+	}
+	entries := make(chan *zeroconf.ServiceEntry)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	go func(results <-chan *zeroconf.ServiceEntry) {
+		for entry := range results {
+			addr := ""
+			if len(entry.AddrIPv4) > 0 {
+				addr = fmt.Sprintf("%s:%d", entry.AddrIPv4[0].String(), entry.Port)
+			} else if len(entry.AddrIPv6) > 0 {
+				addr = fmt.Sprintf("[%s]:%d", entry.AddrIPv6[0].String(), entry.Port)
+			}
+			sendToUI(conn, "device_found", map[string]interface{}{
+				"name":    entry.Instance,
+				"address": addr,
+				"type":    "host",
+			})
+		}
+	}(entries)
+	err = resolver.Browse(ctx, "_lan-bt-audio._tcp", "local.", entries)
+	if err != nil {
+		fmt.Println("mDNS browse failed:", err)
+		return
+	}
+	<-ctx.Done()
+}
+
+func initSpeakerOnce(sr beep.SampleRate) error {
+	// speaker.Init is safe to call multiple times? We guard by a try-init.
+	// If already initialized, calling again may panic; so we use recover.
+	defer func() {
+		_ = recover()
+	}()
+	return speaker.Init(sr, sr.N(time.Second/10))
+}
+
+type progressStreamer struct {
+	s              beep.Streamer
+	samplesPlayed  int
+	total          int
+}
+
+func (p *progressStreamer) Stream(samples [][2]float64) (int, bool) {
+	n, ok := p.s.Stream(samples)
+	p.samplesPlayed += n
+	return n, ok
+}
+
+func (p *progressStreamer) Err() error { return nil }
+
+func filepathExt(p string) string {
+	// robust ext for both / and \ paths
+	base := p
+	if i := strings.LastIndexAny(base, "/\\"); i >= 0 {
+		base = base[i+1:]
+	}
+	return strings.ToLower(filepath.Ext(base))
 }
