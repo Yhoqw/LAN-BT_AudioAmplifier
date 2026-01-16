@@ -1,5 +1,6 @@
 from tkinter import *
 from tkinter import ttk, scrolledtext, messagebox, filedialog
+from unittest import case
 
 import websocket, json, threading
 
@@ -14,7 +15,7 @@ is_connected_to_host = False
 is_streaming = False
 is_connected_devices = []
 discovered_devices = []
-current_track = None
+current_track = None    
 
 # Global UI references
 status_var = None
@@ -38,6 +39,7 @@ fg_color = "#000000"
 
 def setup_ui(root):
     """Setup the main UI components."""
+
     global status_var, devices_tree, connected_listbox, track_label
     global progress_var, play_btn, log_text, volume_scale
     
@@ -59,7 +61,10 @@ def setup_ui(root):
           text="Audio Amplifier", 
           font=("Arial", 16, "bold"), 
           bg=bg_color, 
-          fg=accent_color).grid(row=0, column=0, columnspan=3, pady=(0, 10))
+          fg=accent_color).grid(row=0, 
+                                column=0, 
+                                columnspan=3, 
+                                pady=(0, 10))
     
     # Status Bar
     status_var = StringVar(value="Ready to connect")
@@ -203,7 +208,9 @@ def setup_ui(root):
     
     # Progress bar
     progress_var = DoubleVar()
-    progress_bar = ttk.Progressbar(audio_frame, variable=progress_var, length=400)
+    progress_bar = ttk.Progressbar(audio_frame, 
+                                   variable=progress_var, 
+                                   length=400)
     
     progress_bar.grid(row=1, 
                       column=0, 
@@ -234,9 +241,6 @@ def setup_ui(root):
                        columnspan=3, 
                        pady=(0, 10))
     
-    Button(control_frame, text="⏮", command=previous_track, bg=secondary_bg_color,
-           width=5).pack(side=LEFT, padx=2)
-    
     play_btn = Button(control_frame, 
                       text="▶ Play", 
                       command=toggle_playback, 
@@ -246,12 +250,6 @@ def setup_ui(root):
                       state=DISABLED)
     
     play_btn.pack(side=LEFT, padx=2)
-    
-    Button(control_frame, 
-           text="⏭", 
-           command=next_track, 
-           bg=secondary_bg_color,
-           width=5).pack(side=LEFT, padx=2)
     
     Button(control_frame, 
            text="⏹ Stop", 
@@ -396,14 +394,6 @@ def stop_streaming():
     log_message("Audio streaming stopped")
     ws_send("stop", {})
 
-def previous_track():
-    log_message("Previous track")
-    progress_var.set(0)
-
-def next_track():
-    log_message("Next track")
-    progress_var.set(0)
-
 def set_volume(level):
     ws_send("volume", {"level": level})
 
@@ -450,68 +440,95 @@ def ws_listener():
         try:
             raw = ws.recv()
             obj = json.loads(raw)
-            root.after(0, lambda: handle_backend_message(obj))
+            root.after(0, 
+                       lambda: handle_backend_message(obj))
+
         except Exception as e:
-            root.after(0, lambda: log_message(str(e)))
+            error_msg = str(e)
+            root.after(0,
+                       lambda msg=error_msg: log_message(msg))
             break
 
 def handle_backend_message(msg):
+    """Handle incoming messages from the backend."""
+
     t = msg.get("Type") or msg.get("type")
     d = msg.get("Data") or msg.get("data") or {}
-    if t == "status":
-        status_var.set(d.get("message", ""))
-    elif t == "host_started":
-        global is_host
-        is_host = True
-        status_var.set("Hosting")
-    elif t == "device_found":
-        name = d.get("name", "")
-        addr = d.get("address", "")
-        typ = d.get("type", "")
-        devices_tree.insert("", END, values=(name, typ, "Available", addr))
-    elif t == "connected":
-        global is_connected_to_host, is_connected_devices
-        is_connected_to_host = True
-        name = d.get("name", "Remote Host")
-        status_var.set(f"Connected to: {name}")
-        if name not in is_connected_devices:
-            is_connected_devices.append(name)
-            update_connected_list()
-    elif t == "playback_started":
-        global is_streaming
-        is_streaming = True
-        play_btn.config(text="⏸ Pause")
-        progress_var.set(0)
-    elif t == "playback_paused":
-        is_streaming = False
-        play_btn.config(text="▶ Play")
-    elif t == "playback_stopped":
-        is_streaming = False
-        play_btn.config(text="▶ Play")
-        progress_var.set(0)
-    elif t == "progress_update":
-        pos = d.get("position", 0.0)
-        tot = d.get("total", 100.0)
-        val = 0.0
-        if tot:
-            val = (pos / tot) * 100.0
-        progress_var.set(min(100.0, max(0.0, val)))
-    elif t == "volume_changed":
-        try:
-            level = d.get("level")
-            if volume_scale:
-                volume_scale.set(int(level))
-        except Exception:
-            pass
-    elif t == "file_loaded":
-        filename = d.get("filename", "")
-        track_name = filename.split('/')[-1].split('\\')[-1]
-        track_label.config(text=f"Now playing: {track_name}")
-        play_btn.config(state=NORMAL)
-    elif t == "log":
-        m = d.get("message", "")
-        log_message(m)
 
+    match t:
+        case "status":
+            status_var.set(d.get("message", ""))
+
+        case "host_started":
+            global is_host
+            is_host = True
+            status_var.set("Hosting")
+
+        case "device_found":
+            name = d.get("name", "")
+            addr = d.get("address", "")
+            typ = d.get("type", "")
+
+            # Check if device already exists
+            existing_items = devices_tree.get_children()
+            device_exists = any(
+                devices_tree.item(item)["values"][3] == addr 
+                for item in existing_items
+            )
+
+            if not device_exists:
+                devices_tree.insert("", END, values=(name, 
+                                                     typ, 
+                                                     "Available", 
+                                                     addr))
+    
+        case "connected":
+            global is_connected_to_host, is_connected_devices
+            is_connected_to_host = True
+            name = d.get("name", "Remote Host")
+            status_var.set(f"Connected to: {name}")
+            if name not in is_connected_devices:
+                is_connected_devices.append(name)
+                update_connected_list()
+
+        case "playback_started":
+            global is_streaming
+            is_streaming = True
+            play_btn.config(text= "⏸ Pause")
+            progress_var.set(0)
+
+        case "playback_paused":
+            is_streaming = False
+            play_btn.config(text= "▶ Play")
+
+        case "playback_stopped":
+            is_streaming = False
+            play_btn.config(text= "▶ Play")
+            progress_var.set(0)
+
+        case "progress_update":
+            pos = d.get("position", 0.0)
+            tot = d.get("total", 100.0)
+            val = (pos / tot) * 100.0 if tot else 0.0
+            progress_var.set(min(100.0, max(0.0, val)))
+
+        case "volume_changed":
+            try:
+                if volume_scale:
+                    volume_scale.set(int(d.get("level")))
+            except Exception:
+                pass
+
+        case "file_loaded":
+            filename = d.get("filename", "")
+            track_name = filename.split('/')[-1].split('\\')[-1]
+            track_label.config(text=f"Now playing: {track_name}")
+            play_btn.config(state=NORMAL)
+
+        case "log":
+            log_message(d.get("message", ""))
+
+            
 def main():
     setup_ui(root)
     connect_backend()

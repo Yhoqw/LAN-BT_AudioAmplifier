@@ -5,21 +5,21 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"net/url"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
-	"github.com/grandcat/zeroconf"
 	"github.com/faiface/beep"
 	"github.com/faiface/beep/effects"
 	"github.com/faiface/beep/mp3"
 	"github.com/faiface/beep/speaker"
 	"github.com/faiface/beep/wav"
+	"github.com/gorilla/websocket"
+	"github.com/grandcat/zeroconf"
 )
 
 // Simple state
@@ -28,15 +28,16 @@ var (
 	connectedClients = make(map[string]*websocket.Conn)
 	discoveredHosts  = make(map[string]string)
 	mdnsServer       *zeroconf.Server
+
 	// Audio state
-	audioBuf         *beep.Buffer
-	audioFormat      beep.Format
-	audioCtrl        *beep.Ctrl
-	audioVol         *effects.Volume
-	audioSampleRate  beep.SampleRate
-	audioProgress    *progressStreamer
-	audioTickerStop  chan struct{}
-	audioMu          sync.Mutex
+	audioBuf        *beep.Buffer
+	audioFormat     beep.Format
+	audioCtrl       *beep.Ctrl
+	audioVol        *effects.Volume
+	audioSampleRate beep.SampleRate
+	audioProgress   *progressStreamer
+	audioTickerStop chan struct{}
+	audioMu         sync.Mutex
 )
 
 // Websocket upgrader
@@ -150,8 +151,7 @@ func become_host(conn *websocket.Conn) {
 func scan_devices(conn *websocket.Conn) {
 	fmt.Println("Scanning for devices...")
 	mdnsBrowseOnce(conn)
-	discoveredHosts["John's Laptop"] = "192.168.1.100:9090"
-	discoveredHosts["Living Room PC"] = "192.168.1.101:9090"
+
 	for name, address := range discoveredHosts {
 		sendToUI(conn, "device_found", map[string]interface{}{
 			"name":    name,
@@ -387,9 +387,9 @@ func initSpeakerOnce(sr beep.SampleRate) error {
 }
 
 type progressStreamer struct {
-	s              beep.Streamer
-	samplesPlayed  int
-	total          int
+	s             beep.Streamer
+	samplesPlayed int
+	total         int
 }
 
 func (p *progressStreamer) Stream(samples [][2]float64) (int, bool) {

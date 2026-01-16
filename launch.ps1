@@ -30,3 +30,6 @@ if (-not (Wait-Port -Port 9090 -TimeoutSec 30)) {
 }
 $uiProc = Start-Process -FilePath "python" -ArgumentList @("main.py") -PassThru
 Write-Host "Backend PID: $($backendProc.Id)  UI PID: $($uiProc.Id)"
+
+# This is just to run on my device
+# powershell -ExecutionPolicy Bypass -File .\launch.ps1
