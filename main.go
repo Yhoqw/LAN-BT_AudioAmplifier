@@ -86,6 +86,15 @@ func handleUIWebSocket(writer http.ResponseWriter, request *http.Request) {
 		"message": "Backend Ready",
 	})
 
+	// If we're a host, notify about this client connection
+	if isHost {
+		clientIP := strings.Split(request.RemoteAddr, ":")[0]
+		sendToUI(conn, "client_found", map[string]interface{}{
+			"name":    "Client",
+			"address": clientIP,
+		})
+	}
+
 	// Handle UI messages
 	for {
 		var msg UIMessage
@@ -115,6 +124,8 @@ func handleUIMessage(conn *websocket.Conn, msg UIMessage) {
 
 	case "play":
 		startPlayback(conn)
+
+		sendTestPacket(conn)
 
 	case "pause":
 		pausePlayback(conn)
@@ -164,12 +175,27 @@ func scan_devices(conn *websocket.Conn) {
 func connectToHost(conn *websocket.Conn, address string) {
 	isHost = false
 	u := url.URL{Scheme: "ws", Host: address, Path: "/ws"}
+
 	c, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
 	if err != nil {
 		logMsg(conn, "Remote connect failed: "+err.Error())
 		return
 	}
 	connectedClients[address] = c
+
+	// Notify the host that a client connected
+	hostNotification := UIMessage{
+		Type: "client_connected",
+		Data: map[string]interface{}{
+			"name":    "Remote Client",
+			"address": getLocalIP(),
+		},
+	}
+	if err := c.WriteJSON(hostNotification); err != nil {
+		logMsg(conn, "Failed to notify host: "+err.Error())
+		return
+	}
+
 	sendToUI(conn, "connected", map[string]interface{}{
 		"address": address,
 		"name":    "Remote Host",
@@ -329,11 +355,14 @@ func startDiscovery() {
 	name, _ := os.Hostname()
 	ip := getLocalIP()
 	instance := fmt.Sprintf("%s-%s", name, ip)
+
+	var portInt int = 9090
+
 	server, err := zeroconf.Register(
 		instance,
 		"_lan-bt-audio._tcp",
 		"local.",
-		9090,
+		portInt,
 		[]string{"path=/ws"},
 		nil,
 	)
@@ -407,4 +436,33 @@ func filepathExt(p string) string {
 		base = base[i+1:]
 	}
 	return strings.ToLower(filepath.Ext(base))
+}
+
+func sendTestPacket(conn *websocket.Conn) {
+	audioMu.Lock()
+	defer audioMu.Unlock()
+
+	// Send to UI
+	testMsg := fmt.Sprintf("TEST_PACKET_%d", time.Now().UnixNano())
+	sendToUI(conn, "test_packet", map[string]interface{}{
+		"message":   testMsg,
+		"timestamp": time.Now().Unix(),
+	})
+
+	// Send to all connected remote hosts
+	for addr, remoteConn := range connectedClients {
+		msg := UIMessage{
+			Type: "test_packet_received",
+			Data: map[string]interface{}{
+				"from":      getLocalIP(),
+				"message":   testMsg,
+				"timestamp": time.Now().Unix(),
+			},
+		}
+		if err := remoteConn.WriteJSON(msg); err != nil {
+			logMsg(conn, fmt.Sprintf("Failed to send test packet to %s: %s", addr, err.Error()))
+		} else {
+			logMsg(conn, fmt.Sprintf("Test packet sent to %s", addr))
+		}
+	}
 }

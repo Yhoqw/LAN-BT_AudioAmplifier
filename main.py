@@ -1,5 +1,5 @@
 from tkinter import *
-from tkinter import ttk, scrolledtext, messagebox, filedialog
+from tkinter import ttk, scrolledtext, messagebox, filedialog, simpledialog
 from unittest import case
 
 import websocket, json, threading
@@ -118,17 +118,17 @@ def setup_ui(root):
            padx=15, 
            pady=5).pack(side=LEFT, padx=5)
     
-    Button(btn_frame, text="Connect", 
-           command=connect_to_host, 
-           bg=secondary_bg_color,
-           padx=15, 
-           pady=5).pack(side=LEFT, padx=5)
+    # Button(btn_frame, text="Connect", 
+    #        command=connect_to_host, 
+    #        bg=secondary_bg_color,
+    #        padx=15, 
+    #        pady=5).pack(side=LEFT, padx=5)
     
-    Button(btn_frame, text="Disconnect", 
-           command=disconnect, 
-           bg=secondary_bg_color,
-           padx=15, 
-           pady=5).pack(side=LEFT, padx=5)
+    # Button(btn_frame, text="Disconnect", 
+    #        command=disconnect, 
+    #        bg=secondary_bg_color,
+    #        padx=15, 
+    #        pady=5).pack(side=LEFT, padx=5)
     
     # Devices List frame
     devices_frame = LabelFrame(main_frame, 
@@ -142,7 +142,7 @@ def setup_ui(root):
                        padx=(0, 5))
     devices_frame.configure(bg=bg_color)
     
-    # Treeview for devices
+    ## Treeview for devices
     tree_frame = Frame(devices_frame, bg=bg_color)
     tree_frame.pack(fill=BOTH, expand=True)
     
@@ -321,12 +321,23 @@ def become_host():
     ws_send("become_host", {})
 
 def scan_devices():
-    log_message("Scanning for nearby devices...")
-    for item in devices_tree.get_children():
-        devices_tree.delete(item)
-    ws_send("scan_devices", {})
+    """Prompt user to enter IP address directly."""
 
-def connect_to_host():
+    dialog = simpledialog.askstring(
+        "Connect to Host",
+        "Enter the IP address of the host:\n(format: 192.168.1.100:9090)",
+        parent=root
+    )
+    
+    if dialog:
+        address = dialog.strip()
+        if address:
+            log_message(f"Attempting to connect to {address}...")
+            ws_send("connect_device", {"address": address})
+        else:
+            messagebox.showwarning("Empty input", "Please enter a valid IP address")
+
+def connect_to_host():                  # Related button is currently disconnected
     selection = devices_tree.selection()
     
     if not selection:
@@ -339,7 +350,7 @@ def connect_to_host():
     address = values[3]
     ws_send("connect_device", {"address": address})
 
-def disconnect():
+def disconnect():                       # Related button is currently disconnected
     global is_host, is_connected_to_host, is_streaming, is_connected_devices
     is_host = False
     is_connected_to_host = False
@@ -416,10 +427,12 @@ def connect_backend():
     try:
         ws = websocket.create_connection("ws://localhost:9090/ws")
         log_message("Connected to backend")
+
     except Exception as e:
         status_var.set("Backend connection failed")
         log_message(str(e))
         return
+    
     t = threading.Thread(target=ws_listener, daemon=True)
     t.start()
 
@@ -452,12 +465,12 @@ def ws_listener():
 def handle_backend_message(msg):
     """Handle incoming messages from the backend."""
 
-    t = msg.get("Type") or msg.get("type")
-    d = msg.get("Data") or msg.get("data") or {}
+    Backend_message_type = msg.get("Type") or msg.get("type")              #Type
+    Backend_message_data = msg.get("Data") or msg.get("data") or {}        #Data
 
-    match t:
+    match Backend_message_type:
         case "status":
-            status_var.set(d.get("message", ""))
+            status_var.set(Backend_message_data.get("message", ""))
 
         case "host_started":
             global is_host
@@ -465,9 +478,9 @@ def handle_backend_message(msg):
             status_var.set("Hosting")
 
         case "device_found":
-            name = d.get("name", "")
-            addr = d.get("address", "")
-            typ = d.get("type", "")
+            name = Backend_message_data.get("name", "")
+            addr = Backend_message_data.get("address", "")
+            typ = Backend_message_data.get("type", "")
 
             # Check if device already exists
             existing_items = devices_tree.get_children()
@@ -485,7 +498,7 @@ def handle_backend_message(msg):
         case "connected":
             global is_connected_to_host, is_connected_devices
             is_connected_to_host = True
-            name = d.get("name", "Remote Host")
+            name = Backend_message_data.get("name", "Remote Host")
             status_var.set(f"Connected to: {name}")
             if name not in is_connected_devices:
                 is_connected_devices.append(name)
@@ -507,28 +520,54 @@ def handle_backend_message(msg):
             progress_var.set(0)
 
         case "progress_update":
-            pos = d.get("position", 0.0)
-            tot = d.get("total", 100.0)
+            pos = Backend_message_data.get("position", 0.0)
+            tot = Backend_message_data.get("total", 100.0)
             val = (pos / tot) * 100.0 if tot else 0.0
             progress_var.set(min(100.0, max(0.0, val)))
 
         case "volume_changed":
             try:
                 if volume_scale:
-                    volume_scale.set(int(d.get("level")))
+                    volume_scale.set(int(Backend_message_data.get("level")))
             except Exception:
                 pass
 
         case "file_loaded":
-            filename = d.get("filename", "")
+            filename = Backend_message_data.get("filename", "")
             track_name = filename.split('/')[-1].split('\\')[-1]
             track_label.config(text=f"Now playing: {track_name}")
             play_btn.config(state=NORMAL)
 
         case "log":
-            log_message(d.get("message", ""))
+            log_message(Backend_message_data.get("message", ""))
 
+        case "test_packet":
+            msg_content = Backend_message_data.get("message", "")
             
+            log_message(f"Packet sent: {msg_content}")
+        
+        case "test_packet_received":
+            send = Backend_message_data.get("from", "Unknown")
+            msg_content = Backend_message_data.get("message", "")
+
+            log_message(f" Test packet received from {send}: {msg_content}")
+
+        case "client_connected":
+            client_name = Backend_message_data.get("name", "Unknown client")
+            client_addr = Backend_message_data.get("address", "")
+
+            log_message(f"Client connected: {client_name} ({client_addr})")
+
+            if client_name not in is_connected_devices:
+                is_connected_devices.append(client_name)
+                update_connected_list()
+        
+        case "client_found":
+            client_name = Backend_message_data.get("name", "Unknown client")
+            client_addr = Backend_message_data.get("address", "")
+            log_message(f"Client found the host: {client_name} ({client_addr})")           
+
+        
 def main():
     setup_ui(root)
     connect_backend()
