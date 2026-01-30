@@ -150,8 +150,6 @@ func become_host(conn *websocket.Conn) {
 func scan_devices(conn *websocket.Conn) {
 	fmt.Println("Scanning for devices...")
 	mdnsBrowseOnce(conn)
-	discoveredHosts["John's Laptop"] = "192.168.1.100:9090"
-	discoveredHosts["Living Room PC"] = "192.168.1.101:9090"
 	for name, address := range discoveredHosts {
 		sendToUI(conn, "device_found", map[string]interface{}{
 			"name":    name,
@@ -356,6 +354,7 @@ func mdnsBrowseOnce(conn *websocket.Conn) {
 	defer cancel()
 	go func(results <-chan *zeroconf.ServiceEntry) {
 		for entry := range results {
+
 			addr := ""
 			if len(entry.AddrIPv4) > 0 {
 				addr = fmt.Sprintf("%s:%d", entry.AddrIPv4[0].String(), entry.Port)
