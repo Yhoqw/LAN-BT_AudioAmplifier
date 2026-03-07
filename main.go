@@ -1,468 +1,434 @@
+// Written By Yazdan Ali Khan and Azlan Ali Khan, 2026
+
+/* connecting our backend to our frontend (Go Backend to Python Frontend)
+   We are using ZeroConfig which uses mDNS to "advertise" our service, essentialy to search for devices (Network Devices)
+	 then we connect to devices via WebSockets, after that we send the audio in this case to be streamed in realtime
+
+	 For Audio we encode via pcm then we send that data to Slave which then uses oto library to play that audio 
+
+	--PS--
+	ZeroConf only works for LAN Devices
+*/
+
 package main
 
 import (
-	"context"
-	"fmt"
-	"log"
-	"net"
-	"net/http"
-	"net/url"
+	"context" // For Async tasks
+	"fmt"     // Reading Files
+	"io"
+	"log"      // Logging
+	"net/http" // HTTP client interface
 	"os"
-	"path/filepath"
+	"os/signal"
 	"strings"
 	"sync"
 	"time"
+	"math"
+	"bytes"
 
-	"github.com/faiface/beep"
-	"github.com/faiface/beep/effects"
-	"github.com/faiface/beep/mp3"
-	"github.com/faiface/beep/speaker"
-	"github.com/faiface/beep/wav"
-	"github.com/gorilla/websocket"
-	"github.com/grandcat/zeroconf"
+	// Audio Streaming and Playback Libraries
+	"github.com/faiface/beep/vorbis" // ogg file decoder
+	"github.com/ebitengine/oto/v3"
+
+	// Network Programming Libraries, this websocket library and the ZeroConfiguration Networking library
+	"github.com/gorilla/websocket" // Go Websocket library
+	"github.com/grandcat/zeroconf" // Zeroconf library
 )
 
-// Simple state
-var (
-	isHost           = false
-	connectedClients = make(map[string]*websocket.Conn)
-	discoveredHosts  = make(map[string]string)
-	mdnsServer       *zeroconf.Server
-
-	// Audio state
-	audioBuf        *beep.Buffer
-	audioFormat     beep.Format
-	audioCtrl       *beep.Ctrl
-	audioVol        *effects.Volume
-	audioSampleRate beep.SampleRate
-	audioProgress   *progressStreamer
-	audioTickerStop chan struct{}
-	audioMu         sync.Mutex
-)
-
-// Websocket upgrader
+/* Upgrades the http to a Websocket
+Client sends an HTTP request to the server to upgrade connection used for HTTP to use WebSocket Protocol
+*/
 var upgrader = websocket.Upgrader{
+	// Currently CheckOrigin allows for connection from any origin, (allows all WebSocket Connections regardless of Origin) 
 	CheckOrigin: func(r *http.Request) bool {
 		return true
+		
+	/* for safety (mainly in client/server applications this is the standard code written to allow only for connections from the server)
+		origin := r.Header.Get("Origin")
+		return origin == "http://localhost:<PORT>" */
 	},
 }
 
-// Message types for UI communication
-// Added json tags so Go knows how to map Python/JS keys
-type UIMessage struct {
-	Type string                 `json:"type"`
-	Data map[string]interface{} `json:"data"`
-}
 
+// ===FUNCTIONS===
+	
 func main() {
-	fmt.Println("Backend Starting...")
+	fmt.Println("Backend Starting... selected opt")
 
-	// Start Websocket server
-	http.HandleFunc("/ws", handleUIWebSocket)
+	var ver int
+	fmt.Println("Which version do you want to run Python UI or TUI? 1 or 0")
+	fmt.Scan(&ver)
 
-	go startDiscovery()
+	if (ver == 1) {
 
-	port := "9090"
-	fmt.Printf("Listening on http://localhost:%s\n", port)
-	fmt.Printf("Python UI should connect to ws://localhost:%s/ws\n", port)
+		//Currently the UI Code and the code written for this TUI is completely different
+		//Start Websocket server
+		http.HandleFunc("/ws", handleUIWebSocket) 															// This is to connect the backend and the frontend, we don't want to touch the UI right now
 
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
-		log.Fatal("Server error:", err)
+		go startDiscovery()
+
+		PORT := "9090"																														// Our Backends PORT
+		fmt.Printf("Listening on http://localhost:%s\n", PORT)
+		fmt.Printf("Python UI should connect to ws://localhost:%s/ws\n", PORT)
+
+		if err := http.ListenAndServe(":"+PORT, nil); err != nil {
+			log.Fatal("Server error:", err)
+		}
 	}
+
+	// ====== ========================================================== CURRENT CODE ==============================================================================
+	cli()
 }
 
-func handleUIWebSocket(writer http.ResponseWriter, request *http.Request) {
-	conn, err := upgrader.Upgrade(writer, request, nil)
+const (
+	COLOR_RESET = "\033[0m"
+	COLOR_GREEN = "\x1b[32m" 
+	COLOR_RED = "\033[0;31m" 
+	COLOR_YELLOW = "\033[33m"
+)
+
+func cli() {
+	fmt.Println("Are you searching for devices or advertising? 1 or 0")
+	var opt int
+	fmt.Scan(&opt)
+	
+	// MASTER
+	if opt == 0 {
+		master()
+	}
+	// SLAVE
+	if opt == 1 {
+		slave()
+	}
+
+}
+
+// Handles the Server Side
+func master() {
+	
+	// Zeroconf Registration (Advertisement)
+	server, err := zeroconf.Register(
+		"GoZeroconf",
+		"_workstation._tcp",
+		"local.",
+		42424,
+		[]string{"txtv=0", "lo=1", "la=2"},
+		nil,
+	)
 	if err != nil {
-		log.Println("UI Websocket upgrade failed:", err)
+		panic(err)
+	}
+	defer server.Shutdown()
+
+	// This is the Websocket listener and the handler for the MASTER
+	http.HandleFunc("/ws", wsHandler)
+
+	go func() {
+		log.Println("Websocket server listening on :")
+		log.Fatal(http.ListenAndServe(":42424", nil))
+	}()
+
+	// Wait for interrupt or timeout 
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt)
+	select {
+		case <-sig:
+		case <-time.After(time.Second * 280): // this server will timeout in 280 seconds and shut down
+	}
+
+	log.Println("Shutting down.")
+}
+
+func slave() {
+
+	resolver, err := zeroconf.NewResolver(nil)
+	if err != nil {
+		log.Fatalln("failed to initialize the resolver:", err.Error())
+	}
+
+	entries := make(chan *zeroconf.ServiceEntry)
+	
+	// Used to store a record of the services
+	var services []*zeroconf.ServiceEntry
+	var mu sync.Mutex
+
+	// WaitGroup
+	var wg sync.WaitGroup
+
+	// Service-type processor
+	go func(results <-chan *zeroconf.ServiceEntry) {
+
+		discovered := make(map[string]bool)
+		for entry := range results {
+			// Tells us the service Type
+			serviceType := strings.TrimSuffix(entry.Instance, ".local")
+			if !discovered[serviceType] {
+				discovered[serviceType] = true
+
+				log.Printf(COLOR_GREEN + "Found %s service" + COLOR_RESET, serviceType)
+
+				// Channel and context for instance resolution
+				instanceChan := make(chan *zeroconf.ServiceEntry)
+				newctx, cancelctx := context.WithTimeout(context.Background(), 5*time.Second)
+
+				// Goroutine to process instances
+				wg.Add(1)
+				go func(ch <-chan *zeroconf.ServiceEntry) {
+					defer wg.Done()
+					defer cancelctx()
+
+					for inst := range ch {
+						log.Printf(COLOR_GREEN + "📡 Service Instance Found!" + COLOR_RESET)
+						log.Printf("   Instance: %s", inst.Instance)
+						log.Printf("   IP: %v", inst.AddrIPv4)
+						log.Printf("   Port: %d", inst.Port)
+						log.Printf("   HostName: %s", inst.HostName)
+
+						// Add the entry to services list
+						mu.Lock()
+						services = append(services, inst)
+						mu.Unlock()
+					}
+				}(instanceChan)
+
+				// Start browsing instances of this service type
+				go resolver.Browse(newctx, serviceType, "local", instanceChan)
+			}
+
+			// Phase 1 log (service type discovery)
+			log.Printf("Discovered service type: %s", serviceType)
+		}
+
+		if len(discovered) == 0 {
+			log.Println(COLOR_RED + "No services found!" + COLOR_RESET)
+			log.Println("\tTips: check firewall, or enable service discovery, or make sure other devices advertise")
+		} else {
+			log.Printf("Found %d different service types", len(discovered))
+		}
+	}(entries)
+
+	// Browse for all service types
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	log.Println("🔍 Browsing for ALL services on network...")
+	err = resolver.Browse(ctx, "_services._dns-sd._udp", "local", entries)
+	if err != nil {
+		log.Fatalln("Failed to browse:", err.Error())
+	}
+
+	// Wait for main browse to finish
+	<-ctx.Done()
+
+	// Wait for all instance resolution goroutines to finish
+	wg.Wait()
+
+	log.Println(COLOR_YELLOW + "✅ Discovery complete"  + COLOR_RESET)
+
+	fmt.Println("Which of these services do you want to connect to? ");
+
+	var I int
+	var n int
+	var ipno int	
+	
+	for {
+		for i, s := range services {
+			fmt.Printf("[%d] %s (%v:%d)\n", i, s.Instance, s.AddrIPv4, s.Port)
+			I++;
+		}
+		fmt.Scan(&n)
+	
+		if (n <= I) { 
+
+			fmt.Printf("Which ip of these do you want to select?")
+			for {
+				fmt.Scan(&ipno)
+
+				if (ipno <= I) { break }
+				fmt.Println(COLOR_YELLOW + "Cannot select out of range! Try Again: " + COLOR_RESET)
+			}
+			break 
+		}
+		fmt.Println(COLOR_YELLOW + "Cannot select out of range! Try Again: " + COLOR_RESET)
+	}
+
+	// Here initiate the WebSocket Connection
+	wsPort := 42424
+	//ip := "127.0.0.1"
+	ip := services[n].AddrIPv4[ipno].String() 
+
+	url := fmt.Sprintf("ws://%s:%d/ws", ip, wsPort)
+	log.Println("Connecting to ", url)
+
+	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+	if err != nil {
+		log.Fatal("Dial error:", err)
+	}
+	defer conn.Close()
+
+	//----Initializing Audio and playing the bytes Sent by the Server----
+
+	// Initialize Audio Context
+	op := &oto.NewContextOptions{}
+	op.SampleRate = 44100
+	op.ChannelCount = 2
+	op.Format = oto.FormatSignedInt16LE
+
+	audioCtx, ready, err := oto.NewContext(op)
+	if err != nil {
+			log.Fatal("oto.NewContext failed: ", err)
+	}
+	<-ready
+	log.Println("oto ready")
+
+	pr, pw := io.Pipe()
+
+	// Reads and Writes the Audio Stream
+	go func() {
+    silence := make([]byte, 44100*4) // 1 second of silence
+    pw.Write(silence)
+		
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
+					log.Println("Stream Finished Cleanly")
+				} else {
+					log.Println("Connection Error: ", err)
+				}
+
+				pw.Close()
+				return
+			}
+			pw.Write(data)
+		}
+	}()
+
+	player := audioCtx.NewPlayer(pr)
+	player.Play()
+
+	log.Println("player started, reading from websocket...")
+
+	log.Println("waiting for playback to drain...")
+	for player.IsPlaying() {
+			time.Sleep(50 * time.Millisecond)
+	}
+	player.Close()
+	log.Println("Finished Playing!")
+
+}
+
+// Test Function To ensure the Audio Context has been properly initialized and oto library implementation is working as intended 
+func playTestTone(audioCtx *oto.Context) {
+    sampleRate := 44100
+    duration := 2 // seconds
+    frequency := 440.0 // Hz (A4 note)
+    numSamples := sampleRate * duration
+
+    pcm := make([]byte, numSamples*4) // *4 for stereo int16
+
+		for i := range numSamples {
+        t := float64(i) / float64(sampleRate)
+        sample := int16(math.Sin(2*math.Pi*frequency*t) * 32767 * 0.3) // 0.3 = volume
+
+        // Left channel
+        pcm[i*4+0] = byte(sample)
+        pcm[i*4+1] = byte(sample >> 8)
+        // Right channel
+        pcm[i*4+2] = byte(sample)
+        pcm[i*4+3] = byte(sample >> 8)
+    }
+
+    player := audioCtx.NewPlayer(bytes.NewReader(pcm))
+    player.Play()
+
+    for player.IsPlaying() {
+        time.Sleep(100 * time.Millisecond)
+    }
+
+    log.Println("Test tone done — audio pipeline works!")
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+// Is the WebSocket Handler used by the Master to send the Audio as Raw PCM Data via StreamAudio(conn) function
+func wsHandler(w http.ResponseWriter, r *http.Request) {
+
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println("Upgrade error:", err)
 		return
 	}
 	defer conn.Close()
 
-	fmt.Println("UI connected")
+	log.Println("Client Connected")
+	streamAudio(conn, "STOMP")
 
-	// Send initial status
-	sendToUI(conn, "status", map[string]interface{}{
-		"message": "Backend Ready",
-	})
-
-	// If we're a host, notify about this client connection
-	if isHost {
-		clientIP := strings.Split(request.RemoteAddr, ":")[0]
-		sendToUI(conn, "client_found", map[string]interface{}{
-			"name":    "Client",
-			"address": clientIP,
-		})
-	}
-
-	// Handle UI messages
-	for {
-		var msg UIMessage
-		err := conn.ReadJSON(&msg)
-		if err != nil {
-			fmt.Println("UI disconnected")
-			break
-		}
-		handleUIMessage(conn, msg)
-	}
-}
-
-func handleUIMessage(conn *websocket.Conn, msg UIMessage) {
-	fmt.Println("Received UI command:", msg.Type)
-
-	switch msg.Type {
-	case "become_host":
-		become_host(conn)
-
-	case "scan_devices":
-		scan_devices(conn)
-
-	case "connect_device":
-		if addr, ok := msg.Data["address"].(string); ok {
-			connectToHost(conn, addr)
-		}
-
-	case "play":
-		startPlayback(conn)
-
-		sendTestPacket(conn)
-
-	case "pause":
-		pausePlayback(conn)
-
-	case "stop":
-		stopPlayback(conn)
-
-	case "volume":
-		if vol, ok := msg.Data["level"].(float64); ok {
-			setVolume(conn, vol)
-		}
-
-	case "select_file":
-		if path, ok := msg.Data["path"].(string); ok {
-			loadAudioFile(conn, path)
-		}
-	}
-}
-
-// --- Logic Functions ---
-
-func become_host(conn *websocket.Conn) {
-	isHost = true
-	ip := getLocalIP()
-
-	sendToUI(conn, "host_started", map[string]interface{}{
-		"address": ip,
-		"port":    9090,
-	})
-
-	logMsg(conn, "Now hosting at "+ip)
-}
-
-func scan_devices(conn *websocket.Conn) {
-	fmt.Println("Scanning for devices...")
-	mdnsBrowseOnce(conn)
-
-	for name, address := range discoveredHosts {
-		sendToUI(conn, "device_found", map[string]interface{}{
-			"name":    name,
-			"address": address,
-			"type":    "host",
-		})
-	}
-}
-
-func connectToHost(conn *websocket.Conn, address string) {
-	isHost = false
-	u := url.URL{Scheme: "ws", Host: address, Path: "/ws"}
-
-	c, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
+	err = conn.WriteMessage(
+		websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseNormalClosure, "Stream Finished"),
+	)
 	if err != nil {
-		logMsg(conn, "Remote connect failed: "+err.Error())
-		return
+		log.Println("Close Handshake error: ", err)
 	}
-	connectedClients[address] = c
-
-	// Notify the host that a client connected
-	hostNotification := UIMessage{
-		Type: "client_connected",
-		Data: map[string]interface{}{
-			"name":    "Remote Client",
-			"address": getLocalIP(),
-		},
-	}
-	if err := c.WriteJSON(hostNotification); err != nil {
-		logMsg(conn, "Failed to notify host: "+err.Error())
-		return
-	}
-
-	sendToUI(conn, "connected", map[string]interface{}{
-		"address": address,
-		"name":    "Remote Host",
-	})
-	logMsg(conn, "Connected to host: "+address)
+	time.Sleep(500 * time.Millisecond)
+	log.Println("Client Disconnected")
 }
 
-func startPlayback(conn *websocket.Conn) {
-	audioMu.Lock()
-	defer audioMu.Unlock()
-	if audioBuf == nil {
-		logMsg(conn, "No audio file loaded")
-		return
-	}
-	if audioTickerStop != nil {
-		close(audioTickerStop)
-		audioTickerStop = nil
-	}
-	stream := audioBuf.Streamer(0, audioBuf.Len())
-	audioProgress = &progressStreamer{s: stream, total: audioBuf.Len()}
-	audioCtrl = &beep.Ctrl{Streamer: audioProgress, Paused: false}
-	if audioVol == nil {
-		audioVol = &effects.Volume{Streamer: audioCtrl, Base: 2, Volume: 0, Silent: false}
-	} else {
-		audioVol.Streamer = audioCtrl
-	}
-	if audioSampleRate == 0 {
-		audioSampleRate = audioFormat.SampleRate
-	}
-	if err := initSpeakerOnce(audioSampleRate); err != nil {
-		logMsg(conn, "Audio init failed: "+err.Error())
-		return
-	}
-	done := make(chan bool, 1)
-	speaker.Play(beep.Seq(audioVol, beep.Callback(func() {
-		done <- true
-	})))
-	sendToUI(conn, "playback_started", map[string]interface{}{"position": 0.0})
-	audioTickerStop = make(chan struct{})
-	go func(stop <-chan struct{}) {
-		t := time.NewTicker(500 * time.Millisecond)
-		defer t.Stop()
-		for {
-			select {
-			case <-stop:
-				return
-			case <-t.C:
-				pos := float64(audioProgress.samplesPlayed)
-				total := float64(audioProgress.total)
-				sendToUI(conn, "progress_update", map[string]interface{}{
-					"position": pos,
-					"total":    total,
-				})
-			case <-done:
-				sendToUI(conn, "playback_stopped", map[string]interface{}{})
-				return
-			}
-		}
-	}(audioTickerStop)
-}
+// The Audio is streamed from the Master and the stream is sent as PCM Data to the Slave (Client) to "Read"/Play
+func streamAudio(conn *websocket.Conn, file string) {
 
-func pausePlayback(conn *websocket.Conn) {
-	audioMu.Lock()
-	defer audioMu.Unlock()
-	if audioCtrl != nil {
-		audioCtrl.Paused = true
-	}
-	sendToUI(conn, "playback_paused", map[string]interface{}{})
-}
-
-func stopPlayback(conn *websocket.Conn) {
-	audioMu.Lock()
-	defer audioMu.Unlock()
-	if audioCtrl != nil {
-		audioCtrl.Paused = true
-	}
-	if audioTickerStop != nil {
-		close(audioTickerStop)
-		audioTickerStop = nil
-	}
-	sendToUI(conn, "playback_stopped", map[string]interface{}{})
-}
-
-func setVolume(conn *websocket.Conn, level float64) {
-	audioMu.Lock()
-	defer audioMu.Unlock()
-	if audioVol != nil {
-		// Map 0..100 to -5..0 (approx 1/32 to full volume)
-		gain := (level - 100.0) / 20.0
-		audioVol.Volume = gain
-	}
-	sendToUI(conn, "volume_changed", map[string]interface{}{"level": level})
-}
-
-func loadAudioFile(conn *websocket.Conn, filepath string) {
-	audioMu.Lock()
-	defer audioMu.Unlock()
-	f, err := os.Open(filepath)
+	f, err := os.Open(file + ".ogg")
 	if err != nil {
-		logMsg(conn, "Open failed: "+err.Error())
+		log.Fatal(err)
 		return
 	}
 	defer f.Close()
-	ext := strings.ToLower(filepathExt(filepath))
-	var (
-		stream beep.StreamSeekCloser
-		format beep.Format
-	)
-	switch ext {
-	case ".wav":
-		stream, format, err = wav.Decode(f)
-	case ".mp3":
-		stream, format, err = mp3.Decode(f)
-	default:
-		logMsg(conn, "Unsupported format: "+ext)
-		return
-	}
+
+	streamer, format, err := vorbis.Decode(f)
 	if err != nil {
-		logMsg(conn, "Decode failed: "+err.Error())
-		return
+		log.Fatal(err)
 	}
-	defer stream.Close()
-	audioFormat = format
-	audioBuf = beep.NewBuffer(format)
-	audioBuf.Append(stream)
-	durationSec := float64(audioBuf.Len()) / float64(format.SampleRate)
-	sendToUI(conn, "file_loaded", map[string]interface{}{
-		"filename": filepath,
-		"duration": durationSec,
-	})
-}
+	defer streamer.Close()
 
-// --- Helpers ---
+	fmt.Printf("Streaming: %v Hz, %v Channels\n", format.SampleRate, format.NumChannels)
 
-func getLocalIP() string {
-	addrs, _ := net.InterfaceAddrs()
-	for _, addr := range addrs {
-		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-			if ipnet.IP.To4() != nil {
-				return ipnet.IP.String()
-			}
+	/* using pcm to send the audio data to the other devices (Encoding) 
+		 [][2] since the audio is split between left and right channels (stereo sound)*/
+	buffer := make([][2]float64, 1024)
+
+	for {
+		// Streams the Audio
+		n, ok := streamer.Stream(buffer)
+		if !ok {
+			break
 		}
-	}
-	return "127.0.0.1"
-}
 
-func sendToUI(conn *websocket.Conn, msgType string, data map[string]interface{}) {
-	msg := UIMessage{Type: msgType, Data: data}
-	conn.WriteJSON(msg)
-}
+		pcm := make([]byte, n*4)
 
-func logMsg(conn *websocket.Conn, message string) {
-	sendToUI(conn, "log", map[string]interface{}{"message": message})
-}
+		for i := range n {
+			left := int16(buffer[i][0] * 32767)
+			right := int16(buffer[i][1] * 32767)
 
-func startDiscovery() {
-	name, _ := os.Hostname()
-	ip := getLocalIP()
-	instance := fmt.Sprintf("%s-%s", name, ip)
-
-	var portInt int = 9090
-
-	server, err := zeroconf.Register(
-		instance,
-		"_lan-bt-audio._tcp",
-		"local.",
-		portInt,
-		[]string{"path=/ws"},
-		nil,
-	)
-	if err != nil {
-		fmt.Println("mDNS register failed:", err)
-		return
-	}
-	mdnsServer = server
-	fmt.Println("mDNS service advertised")
-}
-
-func mdnsBrowseOnce(conn *websocket.Conn) {
-	resolver, err := zeroconf.NewResolver(nil)
-	if err != nil {
-		fmt.Println("mDNS resolver create failed:", err)
-		return
-	}
-	entries := make(chan *zeroconf.ServiceEntry)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	go func(results <-chan *zeroconf.ServiceEntry) {
-		for entry := range results {
-			addr := ""
-			if len(entry.AddrIPv4) > 0 {
-				addr = fmt.Sprintf("%s:%d", entry.AddrIPv4[0].String(), entry.Port)
-			} else if len(entry.AddrIPv6) > 0 {
-				addr = fmt.Sprintf("[%s]:%d", entry.AddrIPv6[0].String(), entry.Port)
-			}
-			sendToUI(conn, "device_found", map[string]interface{}{
-				"name":    entry.Instance,
-				"address": addr,
-				"type":    "host",
-			})
+			pcm[i*4+0] = byte(left)
+			pcm[i*4+1] = byte(left >> 8)
+			pcm[i*4+2] = byte(right)
+			pcm[i*4+3] = byte(right >> 8)
 		}
-	}(entries)
-	err = resolver.Browse(ctx, "_lan-bt-audio._tcp", "local.", entries)
-	if err != nil {
-		fmt.Println("mDNS browse failed:", err)
-		return
-	}
-	<-ctx.Done()
-}
 
-func initSpeakerOnce(sr beep.SampleRate) error {
-	// speaker.Init is safe to call multiple times? We guard by a try-init.
-	// If already initialized, calling again may panic; so we use recover.
-	defer func() {
-		_ = recover()
-	}()
-	return speaker.Init(sr, sr.N(time.Second/10))
-}
-
-type progressStreamer struct {
-	s             beep.Streamer
-	samplesPlayed int
-	total         int
-}
-
-func (p *progressStreamer) Stream(samples [][2]float64) (int, bool) {
-	n, ok := p.s.Stream(samples)
-	p.samplesPlayed += n
-	return n, ok
-}
-
-func (p *progressStreamer) Err() error { return nil }
-
-func filepathExt(p string) string {
-	// robust ext for both / and \ paths
-	base := p
-	if i := strings.LastIndexAny(base, "/\\"); i >= 0 {
-		base = base[i+1:]
-	}
-	return strings.ToLower(filepath.Ext(base))
-}
-
-func sendTestPacket(conn *websocket.Conn) {
-	audioMu.Lock()
-	defer audioMu.Unlock()
-
-	// Send to UI
-	testMsg := fmt.Sprintf("TEST_PACKET_%d", time.Now().UnixNano())
-	sendToUI(conn, "test_packet", map[string]interface{}{
-		"message":   testMsg,
-		"timestamp": time.Now().Unix(),
-	})
-
-	// Send to all connected remote hosts
-	for addr, remoteConn := range connectedClients {
-		msg := UIMessage{
-			Type: "test_packet_received",
-			Data: map[string]interface{}{
-				"from":      getLocalIP(),
-				"message":   testMsg,
-				"timestamp": time.Now().Unix(),
-			},
+		// Sending the Stream Data 
+		err = conn.WriteMessage(websocket.BinaryMessage, pcm)
+		if err != nil {
+			log.Println("Write error:", err)
+			return
 		}
-		if err := remoteConn.WriteJSON(msg); err != nil {
-			logMsg(conn, fmt.Sprintf("Failed to send test packet to %s: %s", addr, err.Error()))
-		} else {
-			logMsg(conn, fmt.Sprintf("Test packet sent to %s", addr))
-		}
+		log.Printf("Sent chunk: %d bytes", len(pcm))
+
+		// To ensure that the entire stream data is sent in time (and not all at once)
+		sleepDuration := time.Duration(float64(n)/float64(format.SampleRate) * float64(time.Second))
+		time.Sleep(sleepDuration)
 	}
+
+	log.Println("Finished Streaming. Waiting for buffer to clear..")
+	time.Sleep(2 * time.Second)
 }

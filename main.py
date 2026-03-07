@@ -118,17 +118,17 @@ def setup_ui(root):
            padx=15, 
            pady=5).pack(side=LEFT, padx=5)
     
-    # Button(btn_frame, text="Connect", 
-    #        command=connect_to_host, 
-    #        bg=secondary_bg_color,
-    #        padx=15, 
-    #        pady=5).pack(side=LEFT, padx=5)
+    Button(btn_frame, text="Connect", 
+            command=connect_to_host, 
+            bg=secondary_bg_color,
+            padx=15, 
+            pady=5).pack(side=LEFT, padx=5)
     
-    # Button(btn_frame, text="Disconnect", 
-    #        command=disconnect, 
-    #        bg=secondary_bg_color,
-    #        padx=15, 
-    #        pady=5).pack(side=LEFT, padx=5)
+    Button(btn_frame, text="Disconnect", 
+            command=disconnect, 
+            bg=secondary_bg_color,
+            padx=15, 
+            pady=5).pack(side=LEFT, padx=5)
     
     # Devices List frame
     devices_frame = LabelFrame(main_frame, 
@@ -309,9 +309,7 @@ def setup_ui(root):
     main_frame.columnconfigure(0, weight=1)
     main_frame.columnconfigure(1, weight=1)
     main_frame.columnconfigure(2, weight=1)
-    
-    # Add mock devices
-    
+     
     # Initial log message
     log_message("Application started. Ready to connect devices.")
 
@@ -408,6 +406,8 @@ def stop_streaming():
 def set_volume(level):
     ws_send("volume", {"level": level})
 
+
+#---- Helper Functions -----
 def update_connected_list():
     global connected_listbox
     if connected_listbox:
@@ -422,6 +422,7 @@ def log_message(message):
     log_text.insert(END, f"[{timestamp}] {message}\n")
     log_text.see(END)
 
+# ----WebSocket Connections----
 def connect_backend():
     global ws
     try:
@@ -462,6 +463,7 @@ def ws_listener():
                        lambda msg=error_msg: log_message(msg))
             break
 
+# ---- sends the message that the backend depending on which UI Button is selected----
 def handle_backend_message(msg):
     """Handle incoming messages from the backend."""
 
