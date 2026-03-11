@@ -1,6 +1,8 @@
 from tkinter import *
 from tkinter import ttk, scrolledtext, messagebox, filedialog, simpledialog
 from unittest import case
+import sys
+import argparse
 
 import websocket, json, threading
 
@@ -30,6 +32,7 @@ log_text = None
 volume_scale = None
 ws = None
 ws_lock = threading.Lock()
+backend_port = 9090  # Default port, can be overridden by command line
 
 # UI colors
 bg_color = "#f5f5f5"
@@ -114,6 +117,12 @@ def setup_ui(root):
     
     Button(btn_frame, text="Scan Devices", 
            command=scan_devices, 
+           bg=secondary_bg_color,
+           padx=15, 
+           pady=5).pack(side=LEFT, padx=5)
+    
+    Button(btn_frame, text="Direct Connect", 
+           command=direct_connect, 
            bg=secondary_bg_color,
            padx=15, 
            pady=5).pack(side=LEFT, padx=5)
@@ -319,10 +328,14 @@ def become_host():
     ws_send("become_host", {})
 
 def scan_devices():
-    """Prompt user to enter IP address directly."""
+    """Use mDNS discovery to find hosts on the network."""
+    log_message("Scanning for devices using mDNS discovery...")
+    ws_send("scan_devices", {})
 
+def direct_connect():
+    """Prompt user to enter IP address directly for manual connection."""
     dialog = simpledialog.askstring(
-        "Connect to Host",
+        "Direct Connect to Host",
         "Enter the IP address of the host:\n(format: 192.168.1.100:9090)",
         parent=root
     )
@@ -330,7 +343,7 @@ def scan_devices():
     if dialog:
         address = dialog.strip()
         if address:
-            log_message(f"Attempting to connect to {address}...")
+            log_message(f"Attempting direct connection to {address}...")
             ws_send("connect_device", {"address": address})
         else:
             messagebox.showwarning("Empty input", "Please enter a valid IP address")
@@ -426,8 +439,9 @@ def log_message(message):
 def connect_backend():
     global ws
     try:
-        ws = websocket.create_connection("ws://localhost:9090/ws")
-        log_message("Connected to backend")
+        ws_url = f"ws://localhost:{backend_port}/ws"
+        ws = websocket.create_connection(ws_url)
+        log_message(f"Connected to backend at {ws_url}")
 
     except Exception as e:
         status_var.set("Backend connection failed")
@@ -571,6 +585,15 @@ def handle_backend_message(msg):
 
         
 def main():
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Audio Amplifier UI')
+    parser.add_argument('--port', type=int, default=9090, 
+                       help='Backend port to connect to (default: 9090)')
+    args = parser.parse_args()
+    
+    global backend_port
+    backend_port = args.port
+    
     setup_ui(root)
     connect_backend()
 
