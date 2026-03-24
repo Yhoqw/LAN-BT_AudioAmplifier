@@ -15,9 +15,7 @@ import (
 	"time"
 
 	"github.com/faiface/beep"
-	"github.com/faiface/beep/effects"
 	"github.com/faiface/beep/mp3"
-	"github.com/faiface/beep/speaker"
 	"github.com/faiface/beep/vorbis"
 	"github.com/faiface/beep/wav"
 
@@ -31,27 +29,20 @@ import (
 var (
 	isHost           = false                            // should decide who gets to serve the audio
 	connectedClients = make(map[string]*websocket.Conn) // map of connections to our device
+	clientsMu        sync.RWMutex
 	discoveredHosts  = make(map[string]string)          // In theory sends mDNS and then maps those that give a response
 	mdnsServer       *zeroconf.Server                   // Server is to be setup using Zero ZeroConfiguration
 
-	// Audio state            (TODO Refactor this code)
-	audioBuf        *beep.Buffer
-	audioFormat     beep.Format
-	audioCtrl       *beep.Ctrl
-	audioVol        *effects.Volume
-	audioSampleRate beep.SampleRate
-	audioProgress   *progressStreamer
+	// Audio state
+	selectedAudioPath string
+	audioSampleRate   beep.SampleRate
 	audioTickerStop chan struct{}
+	streamStop      chan struct{}
+	streamDone      chan struct{}
 	audioMu         sync.Mutex
-	audioPosition   int  // Current position in samples
-	audioTotal      int  // Total samples in buffer
+	audioPosition   int // Current position in samples
+	audioTotal      int // Estimated total samples in stream
 )
-
-// Audio Stream
-type PCMChunk struct {
-	Type string `json:"type"`
-	Data []byte `json:"data"`
-}
 
 // Message types for UI communication
 type UIMessage struct {
@@ -172,11 +163,16 @@ func become_host(conn *websocket.Conn) {
 	if err != nil {
 		log.Printf("failed to get IP: %v using fallback", err)
 		ip = "0.0.0.0"
+	} else {
+		log.Printf("Got local IP: %s", ip)
 	}
 
 	port, err := getFreePort()
 	if err != nil {
+		logMsg(conn, fmt.Sprintf("Could not Get Free Port, fallback on Port 9090"))
 		port = 9090 // fallback
+	} else {
+		log.Printf("Got Free Port: %d", port)
 	}
 
 	sendToUI(conn, "host_started", map[string]any{
@@ -194,9 +190,13 @@ func become_host(conn *websocket.Conn) {
 			log.Println("Remote client upgrade failed:", err)
 			return
 		}
+		defer remoteConn.Close()
+
 		clientAddr := r.RemoteAddr
 		log.Printf("Remote client connected: %s", clientAddr)
+		clientsMu.Lock()
 		connectedClients[clientAddr] = remoteConn
+		clientsMu.Unlock()
 
 		sendToUI(conn, "client_connected", map[string]any{
 			"name":    "Remote Client",
@@ -208,7 +208,9 @@ func become_host(conn *websocket.Conn) {
 			var msg UIMessage
 			if err := remoteConn.ReadJSON(&msg); err != nil {
 				log.Printf("Remote client %s disconnected: %v", clientAddr, err)
+				clientsMu.Lock()
 				delete(connectedClients, clientAddr)
+				clientsMu.Unlock()
 				return
 			}
 			handleUIMessage(conn, msg)
@@ -221,7 +223,7 @@ func become_host(conn *websocket.Conn) {
 		}
 	}()
 
-	// starting mDNS with this port
+	// starting mDNS with this port (registers the service)
 	go startDiscovery(port)
 }
 
@@ -237,7 +239,7 @@ func scan_devices(conn *websocket.Conn) {
 			"type":    "host",
 		})
 	}
-	
+
 	if len(discoveredHosts) == 0 {
 		logMsg(conn, "No devices found via mDNS. Try 'Direct Connect' with manual IP.")
 	} else {
@@ -254,7 +256,9 @@ func connectToHost(conn *websocket.Conn, address string) {
 		logMsg(conn, "Remote connect failed: "+err.Error())
 		return
 	}
+	clientsMu.Lock()
 	connectedClients[address] = c
+	clientsMu.Unlock()
 
 	// Notify the host that a client connected
 
@@ -280,71 +284,74 @@ func connectToHost(conn *websocket.Conn, address string) {
 		"name":    "Remote Host",
 	})
 	logMsg(conn, "Connected to host: "+address)
+	go startClientAudio(c)
 }
 
 func startPlayback(conn *websocket.Conn) {
 	audioMu.Lock()
-	defer audioMu.Unlock()
-
-	if audioBuf == nil {
+	if selectedAudioPath == "" {
+		audioMu.Unlock()
 		logMsg(conn, "No audio file loaded")
 		return
 	}
+	path := selectedAudioPath
 
-	stream := audioBuf.Streamer(0, audioBuf.Len())
-	
-	// Reset position and total for progress tracking
+	// Stop any previous stream before starting a new one.
+	if streamStop != nil {
+		close(streamStop)
+	}
+	streamStop = make(chan struct{})
+	streamDone = make(chan struct{})
 	audioPosition = 0
-	audioTotal = audioBuf.Len()
-
-	go streamAudioToClient(stream, conn)
-
+	stopSignal := streamStop
+	doneSignal := streamDone
+	audioMu.Unlock()
 	sendToUI(conn, "playback_started", map[string]any{})
+	go streamAudioToClients(conn, path, stopSignal, doneSignal)
 
 	// Start progress ticker
+	audioMu.Lock()
 	if audioTickerStop != nil {
 		close(audioTickerStop)
 	}
 	audioTickerStop = make(chan struct{})
+	audioMu.Unlock()
 	go progressTicker(conn)
-
-	// TODO Update Audio States that we removed
 }
 
 func pausePlayback(conn *websocket.Conn) {
 	audioMu.Lock()
-	defer audioMu.Unlock()
-	if audioCtrl != nil {
-		audioCtrl.Paused = true
+	if streamStop != nil {
+		close(streamStop)
+		streamStop = nil
 	}
+	audioMu.Unlock()
 	sendToUI(conn, "playback_paused", map[string]any{})
 }
 
 func stopPlayback(conn *websocket.Conn) {
 	audioMu.Lock()
 	defer audioMu.Unlock()
-	if audioCtrl != nil {
-		audioCtrl.Paused = true
+	if streamStop != nil {
+		close(streamStop)
+		streamStop = nil
 	}
 	if audioTickerStop != nil {
 		close(audioTickerStop)
 		audioTickerStop = nil
 	}
+	audioPosition = 0
 	sendToUI(conn, "playback_stopped", map[string]any{})
 }
 
 func setVolume(conn *websocket.Conn, level float64) {
-	audioMu.Lock()
-	defer audioMu.Unlock()
-	if audioVol != nil {
-		// Map 0..100 to -5..0 (approx 1/32 to full volume)
-		gain := (level - 100.0) / 20.0
-		audioVol.Volume = gain
-	}
+	// Volume is currently controlled on the playback client side.
 	sendToUI(conn, "volume_changed", map[string]any{"level": level})
 }
 
 func loadAudioFile(conn *websocket.Conn, filepath string) {
+
+	fmt.Printf("Audio File is being loaded! File Path is: %s", filepath)
 
 	audioMu.Lock()
 	defer audioMu.Unlock()
@@ -378,14 +385,20 @@ func loadAudioFile(conn *websocket.Conn, filepath string) {
 	}
 	defer stream.Close()
 
-	audioFormat = format
-	audioBuf = beep.NewBuffer(format)
-	audioBuf.Append(stream)
-	durationSec := float64(audioBuf.Len()) / float64(format.SampleRate)
+	audioSampleRate = format.SampleRate
+	audioTotal = stream.Len()
+	selectedAudioPath = filepath
+
+	durationSec := 0.0
+	if format.SampleRate > 0 && audioTotal > 0 {
+		durationSec = float64(audioTotal) / float64(format.SampleRate)
+	}
+
 	sendToUI(conn, "file_loaded", map[string]any{
 		"filename": filepath,
 		"duration": durationSec,
 	})
+	logMsg(conn, fmt.Sprintf("Loaded audio file: %s", filepath))
 }
 
 // --- Helpers ---
@@ -442,7 +455,7 @@ func startDiscovery(port int) {
 		log.Printf("failed to get IP: %v using fallback", err)
 		ip = "0.0.0.0"
 	}
-	
+
 	// Create unique instance name with hostname, IP, and timestamp to avoid conflicts
 	instance := fmt.Sprintf("%s-%s-%d", name, ip, time.Now().Unix()%10000)
 
@@ -469,9 +482,14 @@ func mdnsBrowseOnce(conn *websocket.Conn) {
 		logMsg(conn, "mDNS resolver create failed: "+err.Error())
 		return
 	}
+
 	entries := make(chan *zeroconf.ServiceEntry)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)  // Increased timeout
+
+	var wg sync.WaitGroup
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second) // 5*time.Second is timeout
 	defer cancel()
+
 	go func(results <-chan *zeroconf.ServiceEntry) {
 		for entry := range results {
 			addr := ""
@@ -498,30 +516,9 @@ func mdnsBrowseOnce(conn *websocket.Conn) {
 		return
 	}
 	<-ctx.Done()
-}
 
-func initSpeakerOnce(sr beep.SampleRate) error {
-	// speaker.Init is safe to call multiple times? We guard by a try-init.
-	// If already initialized, calling again may panic; so we use recover.
-	defer func() {
-		_ = recover()
-	}()
-	return speaker.Init(sr, sr.N(time.Second/10))
+	wg.Wait()
 }
-
-type progressStreamer struct {
-	s             beep.Streamer
-	samplesPlayed int
-	total         int
-}
-
-func (p *progressStreamer) Stream(samples [][2]float64) (int, bool) {
-	n, ok := p.s.Stream(samples)
-	p.samplesPlayed += n
-	return n, ok
-}
-
-func (p *progressStreamer) Err() error { return nil }
 
 func filepathExt(p string) string {
 	// robust ext for both / and \ paths
@@ -533,9 +530,6 @@ func filepathExt(p string) string {
 }
 
 func sendTestPacket(conn *websocket.Conn) {
-	audioMu.Lock()
-	defer audioMu.Unlock()
-
 	// Send to UI
 	testMsg := fmt.Sprintf("TEST_PACKET_%d", time.Now().UnixNano())
 	sendToUI(conn, "test_packet", map[string]any{
@@ -544,7 +538,14 @@ func sendTestPacket(conn *websocket.Conn) {
 	})
 
 	// Send to all connected remote hosts
+	clientsMu.RLock()
+	snapshot := make(map[string]*websocket.Conn, len(connectedClients))
 	for addr, remoteConn := range connectedClients {
+		snapshot[addr] = remoteConn
+	}
+	clientsMu.RUnlock()
+
+	for addr, remoteConn := range snapshot {
 		ip, err := getLocalIP()
 		if err != nil {
 			log.Printf("Failed to get ip: %v using fallback", err)
@@ -570,13 +571,13 @@ func sendTestPacket(conn *websocket.Conn) {
 using pcm to send audio data to other devices (Encoding)
 is encoded separately for left and right speakers
 */
-func samplesToPCM(samples [][2]float64) []byte {
-	pcm := make([]byte, len(samples)*4)
+func samplesToPCM(buffer [][2]float64, n int) []byte {
+	pcm := make([]byte, n*4)
 
-	for i, s := range samples {
+	for i := range n {
 
-		l := int16(s[0] * 32767)
-		r := int16(s[1] * 32767)
+		l := int16(buffer[i][0] * 32767)
+		r := int16(buffer[i][1] * 32767)
 
 		j := i * 4
 
@@ -589,35 +590,79 @@ func samplesToPCM(samples [][2]float64) []byte {
 	return pcm
 }
 
-// Host Streams Audio to Client
-func streamAudioToClient(stream beep.Streamer, conn *websocket.Conn) {
+// Host streams raw PCM to connected clients as binary WS frames.
+func streamAudioToClients(uiConn *websocket.Conn, filePath string, stop <-chan struct{}, done chan<- struct{}) {
+	defer close(done)
+	f, err := os.Open(filePath)
+	if err != nil {
+		logMsg(uiConn, "Open failed: "+err.Error())
+		return
+	}
+	defer f.Close()
+
+	ext := strings.ToLower(filepathExt(filePath))
+	var (
+		stream beep.StreamSeekCloser
+		format beep.Format
+	)
+	switch ext {
+	case ".wav":
+		stream, format, err = wav.Decode(f)
+	case ".mp3":
+		stream, format, err = mp3.Decode(f)
+	case ".ogg":
+		stream, format, err = vorbis.Decode(f)
+	default:
+		logMsg(uiConn, "Unsupported format: "+ext)
+		return
+	}
+	if err != nil {
+		logMsg(uiConn, "Decode failed: "+err.Error())
+		return
+	}
+	defer stream.Close()
+
+	audioMu.Lock()
+	audioSampleRate = format.SampleRate
+	audioTotal = stream.Len()
+	audioPosition = 0
+	audioMu.Unlock()
 
 	buffer := make([][2]float64, 1024)
 
 	for {
+		select {
+		case <-stop:
+			return
+		default:
+		}
+
 		n, ok := stream.Stream(buffer)
+		if n == 0 && !ok {
+			break
+		}
 
 		if n > 0 {
 			// Update position for progress tracking
 			audioMu.Lock()
 			audioPosition += n
-			//currentPos := audioPosition
-			//totalPos := audioTotal
 			audioMu.Unlock()
-			
-			pcm := samplesToPCM(buffer[:n])
 
-			msg := PCMChunk{
-				Type: "audio_chunk",
-				Data: pcm,
-			}
-
+			pcm := samplesToPCM(buffer, n)
+			clientsMu.RLock()
+			snapshot := make(map[string]*websocket.Conn, len(connectedClients))
 			for addr, c := range connectedClients {
-				err := c.WriteJSON(msg)
+				snapshot[addr] = c
+			}
+			clientsMu.RUnlock()
 
+			for addr, c := range snapshot {
+				err := c.WriteMessage(websocket.BinaryMessage, pcm)
 				if err != nil {
-					fmt.Println("stream error to", addr, err)
-					delete(connectedClients, addr) // SUS Code (Might be unecessary)
+					log.Println("stream error to", addr, err)
+					clientsMu.Lock()
+					delete(connectedClients, addr)
+					clientsMu.Unlock()
 				}
 			}
 		}
@@ -626,9 +671,11 @@ func streamAudioToClient(stream beep.Streamer, conn *websocket.Conn) {
 			break
 		}
 
-		// Sleep to match audio rate
-		time.Sleep(time.Duration(float64(n) / float64(audioFormat.SampleRate) * float64(time.Second)))
+		sleepDuration := time.Duration(float64(n) / float64(format.SampleRate) * float64(time.Second))
+		time.Sleep(sleepDuration)
 	}
+
+	sendToUI(uiConn, "playback_stopped", map[string]any{})
 }
 
 func progressTicker(conn *websocket.Conn) {
@@ -673,8 +720,7 @@ func startClientAudio(conn *websocket.Conn) {
 		pw.Write(silence)
 
 		for {
-			var msg PCMChunk
-			err := conn.ReadJSON(&msg)
+			msgType, data, err := conn.ReadMessage()
 			if err != nil {
 				if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
 					log.Println("Stream Finished Cleanly: ", err)
@@ -685,12 +731,14 @@ func startClientAudio(conn *websocket.Conn) {
 				return
 			}
 
-			if msg.Type == "audio_chunk" {
-				_, err := pw.Write(msg.Data)
-				if err != nil {
-					log.Println("Pipe Write Failed!: ", err)
-					return
-				}
+			if msgType != websocket.BinaryMessage {
+				continue
+			}
+
+			_, err = pw.Write(data)
+			if err != nil {
+				log.Println("Pipe Write Failed!: ", err)
+				return
 			}
 		}
 	}()
@@ -706,4 +754,6 @@ func startClientAudio(conn *websocket.Conn) {
 
 	player.Close()
 	log.Println("Finished Playing!")
+
+
 }

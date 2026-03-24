@@ -20,7 +20,7 @@ import (
 	"io"
 	"log" // Logging
 	"math"
-	"net" // For getting free ports
+	"net"      // For getting free ports
 	"net/http" // HTTP client interface
 	"os"
 	"os/signal"
@@ -38,11 +38,10 @@ import (
 	"github.com/grandcat/zeroconf" // Zeroconf library
 )
 
-
 // Command line flags
 var (
-	uiMode bool
-	port int
+	uiMode     bool
+	port       int
 	masterPort int
 )
 
@@ -63,12 +62,12 @@ var upgrader = websocket.Upgrader{
 
 // ===FUNCTIONS===
 
-func main() {	
+func main() {
 	flag.BoolVar(&uiMode, "ui", false, "Run in UI mode (Python frontend)")
 	flag.IntVar(&port, "port", 0, "Port for UI WebSocket server (0 for auto-assign)")
 	flag.IntVar(&masterPort, "master-port", 0, "Port for master WebSocket server (0 for auto-assign)")
 	flag.Parse()
-	
+
 	var ver int
 	if !uiMode {
 		fmt.Println("Which version do you want to run Python UI or TUI? 1 or 0")
@@ -79,10 +78,9 @@ func main() {
 
 	if ver == 1 {
 
-		//Currently the UI Code and the code written for this TUI is completely different
 		//Start Websocket server
 		http.HandleFunc("/ws", handleUIWebSocket) // This is to connect the backend and the frontend
-		
+
 		// Use provided port or get a free one
 		if port == 0 {
 			var err error
@@ -91,7 +89,7 @@ func main() {
 				log.Fatal("Failed to get free port:", err)
 			}
 		}
-		
+
 		PORT := strconv.Itoa(port) // Our Backends PORT
 		fmt.Printf("Listening on http://localhost:%s\n", PORT)
 		fmt.Printf("Python UI should connect to ws://localhost:%s/ws\n", PORT)
@@ -316,7 +314,7 @@ func slave() {
 	op.SampleRate = 44100
 	op.ChannelCount = 2
 	op.Format = oto.FormatSignedInt16LE
-	
+
 	// Add buffer size to reduce conflicts
 	op.BufferSize = 8192
 
@@ -396,7 +394,7 @@ func playTestTone(audioCtx *oto.Context) {
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-// Is the WebSocket Handler used by the Master to send the Audio as Raw PCM Data via StreamAudio(conn) function
+// WebSocket Handler is used by the Master to send the Audio as Raw PCM Data via StreamAudio(conn) function
 func wsHandler(w http.ResponseWriter, r *http.Request) {
 
 	conn, err := upgrader.Upgrade(w, r, nil)

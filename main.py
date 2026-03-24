@@ -1,6 +1,5 @@
 from tkinter import *
 from tkinter import ttk, scrolledtext, messagebox, filedialog, simpledialog
-from unittest import case
 import sys
 import argparse
 
@@ -39,6 +38,14 @@ bg_color = "#f5f5f5"
 accent_color = "#0a84ff"
 secondary_bg_color = "#e9e9e9"
 fg_color = "#000000"
+
+# Button References (References are made in setup_ui() method)
+host_btn = None
+scan_btn = None
+direct_connect_btn = None
+connect_btn = None
+disconnect_btn = None
+
 
 def setup_ui(root):
     """Setup the main UI components."""
@@ -108,36 +115,47 @@ def setup_ui(root):
                    pady=(0, 10), 
                    sticky="w")
     
-    Button(btn_frame, text="Be Host", 
+    global host_btn
+    global scan_btn
+    global direct_connect_btn
+    global connect_btn
+    global disconnect_btn
+
+    host_btn = Button(btn_frame, text="Be Host", 
            command=become_host, 
            bg=accent_color, 
            fg="white",
            padx=15, 
-           pady=5).pack(side=LEFT, padx=5)
-    
-    Button(btn_frame, text="Scan Devices", 
+           pady=5)
+    host_btn.pack(side=LEFT, padx=5)
+
+    scan_btn = Button(btn_frame, text="Scan Devices", 
            command=scan_devices, 
            bg=secondary_bg_color,
            padx=15, 
-           pady=5).pack(side=LEFT, padx=5)
+           pady=5)
+    scan_btn.pack(side=LEFT, padx=5)
     
-    Button(btn_frame, text="Direct Connect", 
+    direct_connect_btn = Button(btn_frame, text="Direct Connect", 
            command=direct_connect, 
            bg=secondary_bg_color,
            padx=15, 
-           pady=5).pack(side=LEFT, padx=5)
+           pady=5)
+    direct_connect_btn.pack(side=LEFT, padx=5)
     
-    Button(btn_frame, text="Connect", 
+    connect_btn = Button(btn_frame, text="Connect", 
             command=connect_to_host, 
             bg=secondary_bg_color,
             padx=15, 
-            pady=5).pack(side=LEFT, padx=5)
+            pady=5)
+    connect_btn.pack(side=LEFT, padx=5)
     
-    Button(btn_frame, text="Disconnect", 
+    disconnect_btn = Button(btn_frame, text="Disconnect", 
             command=disconnect, 
             bg=secondary_bg_color,
             padx=15, 
-            pady=5).pack(side=LEFT, padx=5)
+            pady=5)
+    disconnect_btn.pack(side=LEFT, padx=5)
     
     # Devices List frame
     devices_frame = LabelFrame(main_frame, 
@@ -322,9 +340,61 @@ def setup_ui(root):
     # Initial log message
     log_message("Application started. Ready to connect devices.")
 
+#  ---- Display Toggles ----
+def host_toggle():
+    global is_host
+    global host_btn
+
+    # Was originally host, change to Client
+    if is_host:
+        host_btn.config(text="Be Host", command=become_host)
+        is_host = False
+    else:
+        host_btn.config(text="Be Client", command=become_client)
+        is_host = True
+
+    update_buttons()
+
+def update_buttons():
+
+    global connected_listbox
+    global scan_btn, direct_connect_btn, connect_btn, disconnect_btn    
+
+    # Buttons Do NOT appear for Host Button State
+    if is_host:
+        scan_btn.pack_forget()
+        direct_connect_btn.pack_forget()
+        connect_btn.pack_forget()
+        # TODO Reset is_connected_to_host and remove this button from here
+        disconnect_btn.pack_forget()      
+
+        # Show Connected devices grid
+        connected_listbox.pack(fill=BOTH, expand=True)
+    # Buttons show for Client Button State
+    elif (is_host == False):
+        scan_btn.pack(side=LEFT, padx=5)
+        direct_connect_btn.pack(side=LEFT, padx=5)
+        connect_btn.pack(side=LEFT, padx=5)
+
+        # Hide Connected devices grid
+        connected_listbox.pack_forget()
+
+        if is_connected_to_host:
+            disconnect_btn.pack(side=LEFT, padx=5)
+            connect_btn.pack_forget()
+            direct_connect_btn.pack_forget()
+            scan_btn.pack_forget()
+        else:
+            disconnect_btn.pack_forget()
+
+def become_client():
+    host_toggle()
+    log_message("Switched to CLIENT Mode")
+
 #  ---- UI Functions ----
 
 def become_host():
+    host_toggle()
     ws_send("become_host", {})
 
 def scan_devices():
@@ -370,6 +440,8 @@ def disconnect():                       # Related button is currently disconnect
     is_connected_devices = []
     update_connected_list()
     log_message("Disconnected from all devices")
+
+    update_buttons()
 
 def select_audio_file():
     global current_track
@@ -453,8 +525,10 @@ def connect_backend():
 
 def ws_send(msg_type, data):
     global ws
+
     if ws is None:
         return
+
     payload = {"type": msg_type, "data": data}
     try:
         with ws_lock:
@@ -488,6 +562,7 @@ def handle_backend_message(msg):
         case "status":
             status_var.set(Backend_message_data.get("message", ""))
 
+        # I don't think this is ever recieved TODO write tests for all code
         case "host_started":
             global is_host
             is_host = True
@@ -519,6 +594,7 @@ def handle_backend_message(msg):
             if name not in is_connected_devices:
                 is_connected_devices.append(name)
                 update_connected_list()
+            update_buttons()
 
         case "playback_started":
             global is_streaming

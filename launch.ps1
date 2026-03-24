@@ -63,7 +63,7 @@ function Start-Instance {
         exit 1
     }
     
-    $uiProc = Start-Process -FilePath "python" -ArgumentList @("main.py", "--port", $Port) -PassThru
+    $uiProc = Start-Process -FilePath "pythonw" -ArgumentList @("main.py", "--port", $Port) -PassThru
     
     Write-Host "$Name Backend PID: $($backendProc.Id)  UI PID: $($uiProc.Id)" -ForegroundColor Green
     return @{

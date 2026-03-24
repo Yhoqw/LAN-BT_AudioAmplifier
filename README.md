@@ -65,10 +65,11 @@ Starts only the client instance on port 9091.
 1. In the **Client** window (port 9091):
    - Click "Scan Devices" 
    - The host should appear in the device list
+   - Wait until mDNS discovery ends
    - Select the host and click "Connect"
    - Audio will start playing on the client
 
-### Step 4: Test Features
+### Step 4: Test Features (Audio Playback currently not working)
 - **Volume Control**: Adjust volume on either instance
 - **Playback Control**: Play/Pause/Stop from the host
 - **Progress Tracking**: See real-time progress in both UIs
