@@ -1,24 +1,31 @@
+# Written By Yazdan Ali Khan and Azlan Ali Khan, 2026
+
+import argparse
+import datetime
+import json
+import threading
 from tkinter import *
 from tkinter import ttk, scrolledtext, messagebox, filedialog, simpledialog
-import sys
-import argparse
 
-import websocket, json, threading
+import websocket
 
-# Setting up UI
+# ── Window ─────────────────────────────────────────────────────────────────
+
 root = Tk()
 root.geometry("1000x700")
 root.title("Audio Amplifier")
 
-# State variables
+# ── App state ──────────────────────────────────────────────────────────────
+
 is_host = False
 is_connected_to_host = False
 is_streaming = False
-is_connected_devices = []
+connected_devices = []
 discovered_devices = []
-current_track = None    
+current_track = None
 
-# Global UI references
+# ── UI references (populated in setup_ui) ─────────────────────────────────
+
 status_var = None
 devices_tree = None
 connected_listbox = None
@@ -26,509 +33,346 @@ track_label = None
 progress_var = None
 play_btn = None
 log_text = None
-
-#Webscoket stuff
 volume_scale = None
-ws = None
-ws_lock = threading.Lock()
-backend_port = 9090  # Default port, can be overridden by command line
 
-# UI colors
-bg_color = "#f5f5f5"
-accent_color = "#0a84ff"
-secondary_bg_color = "#e9e9e9"
-fg_color = "#000000"
-
-# Button References (References are made in setup_ui() method)
 host_btn = None
 scan_btn = None
 direct_connect_btn = None
 connect_btn = None
 disconnect_btn = None
 
+# ── WebSocket ──────────────────────────────────────────────────────────────
+
+ws = None
+ws_lock = threading.Lock()
+backend_port = 9090
+
+# ── Theme ──────────────────────────────────────────────────────────────────
+
+BG = "#f5f5f5"
+ACCENT = "#0a84ff"
+SECONDARY_BG = "#e9e9e9"
+FG = "#000000"
+
+
+# ── UI setup ───────────────────────────────────────────────────────────────
 
 def setup_ui(root):
-    """Setup the main UI components."""
-
     global status_var, devices_tree, connected_listbox, track_label
     global progress_var, play_btn, log_text, volume_scale
-    
-    # Set background
-    root.configure(bg=bg_color)
-    
-    # Main container
+    global host_btn, scan_btn, direct_connect_btn, connect_btn, disconnect_btn
+
+    root.configure(bg=BG)
+
     main_frame = ttk.Frame(root, padding="10")
     main_frame.grid(row=0, column=0, sticky="nsew")
-    
-    # Configure grid weights
+
     root.columnconfigure(0, weight=1)
     root.rowconfigure(0, weight=1)
     main_frame.columnconfigure(1, weight=1)
     main_frame.rowconfigure(2, weight=0)
-    
-    # Title
-    Label(main_frame, 
-          text="Audio Amplifier", 
-          font=("Arial", 16, "bold"), 
-          bg=bg_color, 
-          fg=accent_color).grid(row=0, 
-                                column=0, 
-                                columnspan=3, 
-                                pady=(0, 10))
-    
-    # Status Bar
-    status_var = StringVar(value="Ready to connect")
-    status_frame = Frame(main_frame, 
-                         bg=secondary_bg_color, 
-                         relief="sunken", 
-                         bd=1)
-    
-    status_frame.grid(row=1, 
-                      column=0, 
-                      columnspan=3, 
-                      sticky="ew", 
-                      pady=(0, 10))
-    
-    status_indicator = Canvas(status_frame, 
-                              width=12, 
-                              height=12, 
-                              bg="red", 
-                              highlightthickness=0)
-                              
-    status_indicator.pack(side=LEFT, 
-                          padx=(10, 5), 
-                          pady=5)
-    
-    status_label = Label(status_frame, 
-                         textvariable=status_var, 
-                         bg=secondary_bg_color)
-    
-    status_label.pack(side=LEFT, 
-                      padx=5, 
-                      pady=5)
-    
-    # Control buttons frame
-    btn_frame = Frame(main_frame, bg=bg_color)
-    btn_frame.grid(row=2, 
-                   column=0, 
-                   columnspan=3, 
-                   pady=(0, 10), 
-                   sticky="w")
-    
-    global host_btn
-    global scan_btn
-    global direct_connect_btn
-    global connect_btn
-    global disconnect_btn
 
-    host_btn = Button(btn_frame, text="Be Host", 
-           command=become_host, 
-           bg=accent_color, 
-           fg="white",
-           padx=15, 
-           pady=5)
+    # Title
+    Label(main_frame, text="Audio Amplifier", font=("Arial", 16, "bold"),
+          bg=BG, fg=ACCENT).grid(row=0, column=0, columnspan=3, pady=(0, 10))
+
+    # Status bar
+    status_var = StringVar(value="Ready to connect")
+    status_frame = Frame(main_frame, bg=SECONDARY_BG, relief="sunken", bd=1)
+    status_frame.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+
+    Canvas(status_frame, width=12, height=12, bg="red",
+           highlightthickness=0).pack(side=LEFT, padx=(10, 5), pady=5)
+    Label(status_frame, textvariable=status_var,
+          bg=SECONDARY_BG).pack(side=LEFT, padx=5, pady=5)
+
+    # Control buttons
+    btn_frame = Frame(main_frame, bg=BG)
+    btn_frame.grid(row=2, column=0, columnspan=3, pady=(0, 10), sticky="w")
+
+    host_btn = Button(btn_frame, text="Be Host", command=become_host,
+                      bg=ACCENT, fg="white", padx=15, pady=5)
     host_btn.pack(side=LEFT, padx=5)
 
-    scan_btn = Button(btn_frame, text="Scan Devices", 
-           command=scan_devices, 
-           bg=secondary_bg_color,
-           padx=15, 
-           pady=5)
+    scan_btn = Button(btn_frame, text="Scan Devices", command=scan_devices,
+                      bg=SECONDARY_BG, padx=15, pady=5)
     scan_btn.pack(side=LEFT, padx=5)
-    
-    direct_connect_btn = Button(btn_frame, text="Direct Connect", 
-           command=direct_connect, 
-           bg=secondary_bg_color,
-           padx=15, 
-           pady=5)
+
+    direct_connect_btn = Button(btn_frame, text="Direct Connect",
+                                command=direct_connect,
+                                bg=SECONDARY_BG, padx=15, pady=5)
     direct_connect_btn.pack(side=LEFT, padx=5)
-    
-    connect_btn = Button(btn_frame, text="Connect", 
-            command=connect_to_host, 
-            bg=secondary_bg_color,
-            padx=15, 
-            pady=5)
+
+    connect_btn = Button(btn_frame, text="Connect", command=connect_to_host,
+                         bg=SECONDARY_BG, padx=15, pady=5)
     connect_btn.pack(side=LEFT, padx=5)
-    
-    disconnect_btn = Button(btn_frame, text="Disconnect", 
-            command=disconnect, 
-            bg=secondary_bg_color,
-            padx=15, 
-            pady=5)
+
+    disconnect_btn = Button(btn_frame, text="Disconnect", command=disconnect,
+                            bg=SECONDARY_BG, padx=15, pady=5)
     disconnect_btn.pack(side=LEFT, padx=5)
-    
-    # Devices List frame
-    devices_frame = LabelFrame(main_frame, 
-                               text="Available Devices", 
-                               padx=5, 
-                               pady=5)
-    devices_frame.grid(row=3, 
-                       column=0, 
-                       columnspan=2, 
-                       sticky="nsew", 
-                       padx=(0, 5))
-    devices_frame.configure(bg=bg_color)
-    
-    ## Treeview for devices
-    tree_frame = Frame(devices_frame, bg=bg_color)
+
+    # Available devices
+    devices_frame = LabelFrame(main_frame, text="Available Devices", padx=5, pady=5, bg=BG)
+    devices_frame.grid(row=3, column=0, columnspan=2, sticky="nsew", padx=(0, 5))
+
+    tree_frame = Frame(devices_frame, bg=BG)
     tree_frame.pack(fill=BOTH, expand=True)
-    
-    devices_tree = ttk.Treeview(tree_frame, 
-                                columns=("name", "type", "status", "address"), 
-                                show="headings", 
-                                height=12)
-    
-    devices_tree.heading("name", text="Device Name")
-    devices_tree.heading("type", text="Type")
-    devices_tree.heading("status", text="Status")
-    devices_tree.heading("address", text="Address")
-    
-    devices_tree.column("name", width=150)
-    devices_tree.column("type", width=120)
-    devices_tree.column("status", width=120)
-    devices_tree.column("address", width=180)
-    
-    scrollbar = Scrollbar(tree_frame, 
-                          orient=VERTICAL, 
-                          command=devices_tree.yview)
-    
+
+    devices_tree = ttk.Treeview(tree_frame,
+                                columns=("name", "type", "status", "address"),
+                                show="headings", height=12)
+    for col, label, width in [
+        ("name", "Device Name", 150),
+        ("type", "Type", 120),
+        ("status", "Status", 120),
+        ("address", "Address", 180),
+    ]:
+        devices_tree.heading(col, text=label)
+        devices_tree.column(col, width=width)
+
+    scrollbar = Scrollbar(tree_frame, orient=VERTICAL, command=devices_tree.yview)
     devices_tree.configure(yscrollcommand=scrollbar.set)
-    
     devices_tree.pack(side=LEFT, fill=BOTH, expand=True)
     scrollbar.pack(side=RIGHT, fill=Y)
-    
-    # Connected Devices panel
-    connected_frame = LabelFrame(main_frame, 
-                                 text="Connected Devices", 
-                                 padx=10, 
-                                 pady=10)
-    
+
+    # Connected devices
+    connected_frame = LabelFrame(main_frame, text="Connected Devices",
+                                 padx=10, pady=10, bg=BG)
     connected_frame.grid(row=3, column=2, sticky="nsew")
-    connected_frame.configure(bg=bg_color)
-    
+
     connected_listbox = Listbox(connected_frame, height=8, bg="white")
     connected_listbox.pack(fill=BOTH, expand=True)
-    
-    # Audio controls frame
-    audio_frame = LabelFrame(main_frame, 
-                             text="Audio Controls", 
-                             padx=10, 
-                             pady=10)
-    
-    audio_frame.grid(row=4, 
-                     column=0, 
-                     columnspan=3, 
-                     sticky="ew", 
-                     pady=(10, 0))
-    audio_frame.configure(bg=bg_color)
-    
-    # Now playing label
-    track_label = Label(audio_frame, 
-                        text="No audio file selected", 
-                        bg=bg_color)
-    
-    track_label.grid(row=0, 
-                     column=0, 
-                     columnspan=3, 
-                     sticky="w", 
-                     pady=(0, 10))
-    
-    # Progress bar
+
+    # Audio controls
+    audio_frame = LabelFrame(main_frame, text="Audio Controls",
+                             padx=10, pady=10, bg=BG)
+    audio_frame.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+
+    track_label = Label(audio_frame, text="No audio file selected", bg=BG)
+    track_label.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
+
     progress_var = DoubleVar()
-    progress_bar = ttk.Progressbar(audio_frame, 
-                                   variable=progress_var, 
-                                   length=400)
-    
-    progress_bar.grid(row=1, 
-                      column=0, 
-                      columnspan=3, 
-                      sticky="ew", 
-                      pady=(0, 5))
-    
-    # Time labels
-    time_frame = Frame(audio_frame, bg=bg_color)
-    time_frame.grid(row=2, 
-                    column=0, 
-                    columnspan=3, 
-                    sticky="ew", 
-                    pady=(0, 10))
-    
-    current_time = Label(time_frame, text="0:00", bg=bg_color)
-    current_time.pack(side=LEFT)
-    
-    Label(time_frame, text=" / ", bg=bg_color).pack(side=LEFT)
-    
-    total_time = Label(time_frame, text="0:00", bg=bg_color)
-    total_time.pack(side=LEFT)
-    
-    # Control buttons
-    control_frame = Frame(audio_frame, bg=bg_color)
-    control_frame.grid(row=3, 
-                       column=0, 
-                       columnspan=3, 
-                       pady=(0, 10))
-    
-    play_btn = Button(control_frame, 
-                      text="▶ Play", 
-                      command=toggle_playback, 
-                      bg=accent_color, 
-                      fg="white", 
-                      width=8, 
-                      state=DISABLED)
-    
+    ttk.Progressbar(audio_frame, variable=progress_var,
+                    length=400).grid(row=1, column=0, columnspan=3,
+                                     sticky="ew", pady=(0, 5))
+
+    time_frame = Frame(audio_frame, bg=BG)
+    time_frame.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+    Label(time_frame, text="0:00", bg=BG).pack(side=LEFT)
+    Label(time_frame, text=" / ", bg=BG).pack(side=LEFT)
+    Label(time_frame, text="0:00", bg=BG).pack(side=LEFT)
+
+    control_frame = Frame(audio_frame, bg=BG)
+    control_frame.grid(row=3, column=0, columnspan=3, pady=(0, 10))
+
+    play_btn = Button(control_frame, text="▶ Play", command=toggle_playback,
+                      bg=ACCENT, fg="white", width=8, state=DISABLED)
     play_btn.pack(side=LEFT, padx=2)
-    
-    Button(control_frame, 
-           text="⏹ Stop", 
-           command=stop_streaming, 
-           bg=secondary_bg_color,
-           width=8).pack(side=LEFT, padx=2)
-    
-    # File selection button
-    Button(audio_frame, 
-           text="📁 Select Audio File", 
+
+    Button(control_frame, text="⏹ Stop", command=stop_streaming,
+           bg=SECONDARY_BG, width=8).pack(side=LEFT, padx=2)
+
+    Button(audio_frame, text="📁 Select Audio File",
            command=select_audio_file,
-           bg=secondary_bg_color).grid(row=4, 
-                                       column=0, 
-                                       columnspan=3, 
-                                       pady=(5, 0))
-    
-    # Volume controls
-    volume_frame = Frame(audio_frame, bg=bg_color)
-    volume_frame.grid(row=5, 
-                      column=0, 
-                      columnspan=3, 
-                      pady=(10, 0), 
-                      sticky="w")
-    
-    Label(volume_frame, text="Volume:", bg=bg_color).pack(side=LEFT, padx=(0, 5))
-    
-    volume_scale = Scale(volume_frame,
-                         from_=0, 
-                         to=100, 
-                         orient=HORIZONTAL, 
-                         length=150, 
-                         bg=bg_color,
+           bg=SECONDARY_BG).grid(row=4, column=0, columnspan=3, pady=(5, 0))
+
+    volume_frame = Frame(audio_frame, bg=BG)
+    volume_frame.grid(row=5, column=0, columnspan=3, pady=(10, 0), sticky="w")
+
+    Label(volume_frame, text="Volume:", bg=BG).pack(side=LEFT, padx=(0, 5))
+    volume_scale = Scale(volume_frame, from_=0, to=100, orient=HORIZONTAL,
+                         length=150, bg=BG,
                          command=lambda v: set_volume(float(v)))
     volume_scale.set(70)
     volume_scale.pack(side=LEFT, padx=5)
 
-    # Log window
-    log_frame = LabelFrame(main_frame, 
-                           text="Activity Log", 
-                           padx=10, 
-                           pady=10)
-    
-    log_frame.grid(row=5, 
-                   column=0, 
-                   columnspan=3, 
-                   sticky="nsew", 
-                   pady=(10, 0))
-    
-    log_frame.configure(bg=bg_color)
-    
+    # Activity log
+    log_frame = LabelFrame(main_frame, text="Activity Log", padx=10, pady=10, bg=BG)
+    log_frame.grid(row=5, column=0, columnspan=3, sticky="nsew", pady=(10, 0))
+
     log_text = scrolledtext.ScrolledText(log_frame, height=6, bg="white")
     log_text.pack(fill=BOTH, expand=True)
-    
-    # Configure grid weights for resizing
+
     main_frame.rowconfigure(3, weight=1)
     main_frame.rowconfigure(5, weight=0)
     main_frame.columnconfigure(0, weight=1)
     main_frame.columnconfigure(1, weight=1)
     main_frame.columnconfigure(2, weight=1)
-     
-    # Initial log message
-    log_message("Application started. Ready to connect devices.")
 
-#  ---- Display Toggles ----
-def host_toggle():
-    global is_host
-    global host_btn
+    log_message("Application started. Ready to connect.")
 
-    # Was originally host, change to Client
-    if is_host:
-        host_btn.config(text="Be Host", command=become_host)
-        is_host = False
-    else:
-        host_btn.config(text="Be Client", command=become_client)
-        is_host = True
 
-    update_buttons()
+# ── Button state management ─────────────────────────────────────────────────
 
 def update_buttons():
-
-    global connected_listbox
-    global scan_btn, direct_connect_btn, connect_btn, disconnect_btn    
-
-    # Buttons Do NOT appear for Host Button State
+    """Single source of truth for button visibility based on app state."""
     if is_host:
         scan_btn.pack_forget()
         direct_connect_btn.pack_forget()
         connect_btn.pack_forget()
-        # TODO Reset is_connected_to_host and remove this button from here
-        disconnect_btn.pack_forget()      
-
-        # Show Connected devices grid
+        disconnect_btn.pack_forget()
         connected_listbox.pack(fill=BOTH, expand=True)
-    # Buttons show for Client Button State
-    elif (is_host == False):
-        scan_btn.pack(side=LEFT, padx=5)
-        direct_connect_btn.pack(side=LEFT, padx=5)
-        connect_btn.pack(side=LEFT, padx=5)
-
-        # Hide Connected devices grid
+    else:
         connected_listbox.pack_forget()
-
         if is_connected_to_host:
-            disconnect_btn.pack(side=LEFT, padx=5)
-            connect_btn.pack_forget()
-            direct_connect_btn.pack_forget()
             scan_btn.pack_forget()
+            direct_connect_btn.pack_forget()
+            connect_btn.pack_forget()
+            disconnect_btn.pack(side=LEFT, padx=5)
         else:
+            scan_btn.pack(side=LEFT, padx=5)
+            direct_connect_btn.pack(side=LEFT, padx=5)
+            connect_btn.pack(side=LEFT, padx=5)
             disconnect_btn.pack_forget()
 
-def become_client():
-    host_toggle()
-    log_message("Switched to CLIENT Mode")
 
-#  ---- UI Functions ----
+# ── UI action handlers ─────────────────────────────────────────────────────
 
 def become_host():
-    host_toggle()
-    ws_send("become_host", {})
+    global is_host
+    if not is_host:
+        is_host = True
+        host_btn.config(text="Be Client", command=become_client)
+        update_buttons()
+        ws_send("become_host", {})
+        log_message("Switched to HOST mode.")
+
+
+def become_client():
+    global is_host
+    if is_host:
+        is_host = False
+        host_btn.config(text="Be Host", command=become_host)
+        update_buttons()
+        log_message("Switched to CLIENT mode.")
+
 
 def scan_devices():
-    """Use mDNS discovery to find hosts on the network."""
-    log_message("Scanning for devices using mDNS discovery...")
+    log_message("Scanning for devices via mDNS…")
     ws_send("scan_devices", {})
 
+
 def direct_connect():
-    """Prompt user to enter IP address directly for manual connection."""
     dialog = simpledialog.askstring(
-        "Direct Connect to Host",
-        "Enter the IP address of the host:\n(format: 192.168.1.100:9090)",
-        parent=root
+        "Direct Connect",
+        "Enter host IP and port:\n(e.g. 192.168.1.100:9090)",
+        parent=root,
     )
-    
     if dialog:
         address = dialog.strip()
         if address:
-            log_message(f"Attempting direct connection to {address}...")
+            log_message(f"Connecting to {address}…")
             ws_send("connect_device", {"address": address})
         else:
-            messagebox.showwarning("Empty input", "Please enter a valid IP address")
+            messagebox.showwarning("Empty input", "Please enter a valid address.")
 
-def connect_to_host():                  # Related button is currently disconnected
+
+def connect_to_host():
     selection = devices_tree.selection()
-    
     if not selection:
-        messagebox.showwarning("No selection", "Please select a device to connect to")
+        messagebox.showwarning("No selection", "Please select a device to connect to.")
         return
-    
-    item = selection[0]
-    values = devices_tree.item(item, "values")
-    device_name = values[0]
+    values = devices_tree.item(selection[0], "values")
     address = values[3]
     ws_send("connect_device", {"address": address})
 
-def disconnect():                       # Related button is currently disconnected
-    global is_host, is_connected_to_host, is_streaming, is_connected_devices
+
+def disconnect():
+    global is_host, is_connected_to_host, is_streaming, connected_devices
     is_host = False
     is_connected_to_host = False
     is_streaming = False
+    connected_devices = []
     status_var.set("Disconnected")
-    is_connected_devices = []
     update_connected_list()
-    log_message("Disconnected from all devices")
-
     update_buttons()
+    log_message("Disconnected.")
+
 
 def select_audio_file():
     global current_track
     filename = filedialog.askopenfilename(
         title="Select audio file",
-        filetypes=[("Audio files", "*.mp3 *.wav *.flac *.ogg"), ("All files", "*.*")]
+        filetypes=[("Audio files", "*.mp3 *.wav *.flac *.ogg"), ("All files", "*.*")],
     )
-    
     if filename:
         current_track = filename
-        track_name = filename.split('/')[-1]
-        track_label.config(text=f"Now playing: {track_name}")
-        log_message(f"Loaded audio file: {track_name}")
+        track_label.config(text=f"Now playing: {filename.split('/')[-1]}")
+        log_message(f"Loaded: {filename.split('/')[-1]}")
         play_btn.config(state=NORMAL)
         ws_send("select_file", {"path": filename})
 
+
 def toggle_playback():
-    global is_streaming
     if not is_streaming:
         start_streaming()
     else:
         pause_streaming()
+
 
 def start_streaming():
     global is_streaming
     is_streaming = True
     play_btn.config(text="⏸ Pause")
     progress_var.set(0)
-    log_message("Audio streaming started")
+    log_message("Streaming started.")
     ws_send("play", {})
+
 
 def pause_streaming():
     global is_streaming
     is_streaming = False
     play_btn.config(text="▶ Play")
-    log_message("Audio streaming paused")
+    log_message("Streaming paused.")
     ws_send("pause", {})
+
 
 def stop_streaming():
     global is_streaming
     is_streaming = False
     play_btn.config(text="▶ Play")
     progress_var.set(0)
-    log_message("Audio streaming stopped")
+    log_message("Streaming stopped.")
     ws_send("stop", {})
+
 
 def set_volume(level):
     ws_send("volume", {"level": level})
 
 
-#---- Helper Functions -----
+# ── Helpers ────────────────────────────────────────────────────────────────
+
 def update_connected_list():
-    global connected_listbox
     if connected_listbox:
         connected_listbox.delete(0, END)
-        for device in is_connected_devices:
+        for device in connected_devices:
             connected_listbox.insert(END, device)
 
+
 def log_message(message):
-    global log_text
-    import datetime
     timestamp = datetime.datetime.now().strftime("%H:%M:%S")
     log_text.insert(END, f"[{timestamp}] {message}\n")
     log_text.see(END)
 
-# ----WebSocket Connections----
+
+# ── WebSocket ──────────────────────────────────────────────────────────────
+
 def connect_backend():
     global ws
+    ws_url = f"ws://localhost:{backend_port}/ws"
     try:
-        ws_url = f"ws://localhost:{backend_port}/ws"
         ws = websocket.create_connection(ws_url)
         log_message(f"Connected to backend at {ws_url}")
-
     except Exception as e:
         status_var.set("Backend connection failed")
         log_message(str(e))
         return
-    
-    t = threading.Thread(target=ws_listener, daemon=True)
-    t.start()
+    threading.Thread(target=ws_listener, daemon=True).start()
+
 
 def ws_send(msg_type, data):
-    global ws
-
     if ws is None:
         return
-
     payload = {"type": msg_type, "data": data}
     try:
         with ws_lock:
@@ -536,142 +380,116 @@ def ws_send(msg_type, data):
     except Exception as e:
         log_message(str(e))
 
+
 def ws_listener():
-    global ws
     while True:
         try:
             raw = ws.recv()
             obj = json.loads(raw)
-            root.after(0, 
-                       lambda: handle_backend_message(obj))
-
+            root.after(0, lambda o=obj: handle_backend_message(o))
         except Exception as e:
             error_msg = str(e)
-            root.after(0,
-                       lambda msg=error_msg: log_message(msg))
+            root.after(0, lambda msg=error_msg: log_message(msg))
             break
 
-# ---- sends the message that the backend depending on which UI Button is selected----
+
 def handle_backend_message(msg):
-    """Handle incoming messages from the backend."""
+    msg_type = msg.get("Type") or msg.get("type")
+    data = msg.get("Data") or msg.get("data") or {}
 
-    Backend_message_type = msg.get("Type") or msg.get("type")              #Type
-    Backend_message_data = msg.get("Data") or msg.get("data") or {}        #Data
-
-    match Backend_message_type:
+    match msg_type:
         case "status":
-            status_var.set(Backend_message_data.get("message", ""))
+            status_var.set(data.get("message", ""))
 
-        # I don't think this is ever recieved TODO write tests for all code
         case "host_started":
             global is_host
             is_host = True
             status_var.set("Hosting")
 
         case "device_found":
-            name = Backend_message_data.get("name", "")
-            addr = Backend_message_data.get("address", "")
-            typ = Backend_message_data.get("type", "")
-
-            # Check if device already exists
-            existing_items = devices_tree.get_children()
-            device_exists = any(
-                devices_tree.item(item)["values"][3] == addr 
-                for item in existing_items
+            name = data.get("name", "")
+            addr = data.get("address", "")
+            typ = data.get("type", "")
+            existing = devices_tree.get_children()
+            already_listed = any(
+                devices_tree.item(i)["values"][3] == addr for i in existing
             )
+            if not already_listed:
+                devices_tree.insert("", END, values=(name, typ, "Available", addr))
 
-            if not device_exists:
-                devices_tree.insert("", END, values=(name, 
-                                                     typ, 
-                                                     "Available", 
-                                                     addr))
-    
         case "connected":
-            global is_connected_to_host, is_connected_devices
+            global is_connected_to_host, connected_devices
             is_connected_to_host = True
-            name = Backend_message_data.get("name", "Remote Host")
+            name = data.get("name", "Remote Host")
             status_var.set(f"Connected to: {name}")
-            if name not in is_connected_devices:
-                is_connected_devices.append(name)
+            if name not in connected_devices:
+                connected_devices.append(name)
                 update_connected_list()
             update_buttons()
 
         case "playback_started":
             global is_streaming
             is_streaming = True
-            play_btn.config(text= "⏸ Pause")
+            play_btn.config(text="⏸ Pause")
             progress_var.set(0)
 
         case "playback_paused":
             is_streaming = False
-            play_btn.config(text= "▶ Play")
+            play_btn.config(text="▶ Play")
 
         case "playback_stopped":
             is_streaming = False
-            play_btn.config(text= "▶ Play")
+            play_btn.config(text="▶ Play")
             progress_var.set(0)
 
         case "progress_update":
-            pos = Backend_message_data.get("position", 0.0)
-            tot = Backend_message_data.get("total", 100.0)
-            val = (pos / tot) * 100.0 if tot else 0.0
+            pos = data.get("position", 0.0)
+            tot = data.get("total", 100.0)
+            val = (pos / tot * 100.0) if tot else 0.0
             progress_var.set(min(100.0, max(0.0, val)))
 
         case "volume_changed":
             try:
                 if volume_scale:
-                    volume_scale.set(int(Backend_message_data.get("level")))
+                    volume_scale.set(int(data.get("level", 70)))
             except Exception:
                 pass
 
         case "file_loaded":
-            filename = Backend_message_data.get("filename", "")
-            track_name = filename.split('/')[-1].split('\\')[-1]
+            filename = data.get("filename", "")
+            track_name = filename.replace("\\", "/").split("/")[-1]
             track_label.config(text=f"Now playing: {track_name}")
             play_btn.config(state=NORMAL)
 
         case "log":
-            log_message(Backend_message_data.get("message", ""))
-
-        case "test_packet":
-            msg_content = Backend_message_data.get("message", "")
-            
-            log_message(f"Packet sent: {msg_content}")
-        
-        case "test_packet_received":
-            send = Backend_message_data.get("from", "Unknown")
-            msg_content = Backend_message_data.get("message", "")
-
-            log_message(f" Test packet received from {send}: {msg_content}")
+            log_message(data.get("message", ""))
 
         case "client_connected":
-            client_name = Backend_message_data.get("name", "Unknown client")
-            client_addr = Backend_message_data.get("address", "")
-
+            client_name = data.get("name", "Unknown client")
+            client_addr = data.get("address", "")
             log_message(f"Client connected: {client_name} ({client_addr})")
-
-            if client_name not in is_connected_devices:
-                is_connected_devices.append(client_name)
+            if client_name not in connected_devices:
+                connected_devices.append(client_name)
                 update_connected_list()
-        
-        case "client_found":
-            client_name = Backend_message_data.get("name", "Unknown client")
-            client_addr = Backend_message_data.get("address", "")
-            log_message(f"Client found the host: {client_name} ({client_addr})")           
 
-        
+        case "client_found":
+            log_message(f"Client found host: {data.get('name', '')} ({data.get('address', '')})")
+
+
+# ── Entry point ────────────────────────────────────────────────────────────
+
 def main():
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Audio Amplifier UI')
-    parser.add_argument('--port', type=int, default=9090, 
-                       help='Backend port to connect to (default: 9090)')
+    parser = argparse.ArgumentParser(description="Audio Amplifier UI")
+    parser.add_argument("--port", type=int, default=9090,
+                        help="Backend port to connect to (default: 9090)")
     args = parser.parse_args()
-    
+
     global backend_port
     backend_port = args.port
-    
+
     setup_ui(root)
     connect_backend()
+
 
 if __name__ == "__main__":
     main()
